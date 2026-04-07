@@ -36,6 +36,10 @@ const program = new Command()
       return n;
     },
   )
+  .option(
+    "--always-log",
+    "Always write the slot log file even if no market was entered (useful for debugging)",
+  )
   .parse();
 
 const opts = program.opts<{
@@ -43,6 +47,7 @@ const opts = program.opts<{
   slotOffset: number;
   prod?: boolean;
   rounds?: number;
+  alwaysLog?: boolean;
 }>();
 
 acquireProcessLock("early-bird");
@@ -82,5 +87,6 @@ const bot = new EarlyBird(
   opts.slotOffset,
   opts.prod ?? false,
   rounds,
+  opts.alwaysLog ?? false,
 );
 await bot.start();

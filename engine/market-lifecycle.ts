@@ -47,6 +47,19 @@ type RecoveryOptions = {
   orderHistory: CompletedOrder[];
 };
 
+type MarketLifecycleOptions = {
+  slug: string;
+  apiQueue: APIQueue;
+  client: EarlyBirdClient;
+  log: (msg: string, color?: LogColor) => void;
+  strategyName: string;
+  strategy: Strategy;
+  tracker: WalletTracker;
+  ticker: TickerTracker;
+  recovery?: RecoveryOptions;
+  alwaysLog?: boolean;
+};
+
 export class MarketLifecycle {
   private _state: LifecycleState = "INIT";
   private _ticking = false;
@@ -65,17 +78,28 @@ export class MarketLifecycle {
   private _marketOpenTimer: ReturnType<typeof setTimeout> | null = null;
   private _marketPriceHandle: { cancel: () => void } | null = null;
 
-  constructor(
-    readonly slug: string,
-    private readonly apiQueue: APIQueue,
-    private readonly client: EarlyBirdClient,
-    private readonly _log: (msg: string, color?: LogColor) => void,
-    private readonly _strategyName: string,
-    private readonly _strategy: Strategy,
-    private readonly _tracker: WalletTracker,
-    private readonly _ticker: TickerTracker,
-    recovery?: RecoveryOptions,
-  ) {
+  readonly slug: string;
+  private readonly apiQueue: APIQueue;
+  private readonly client: EarlyBirdClient;
+  private readonly _log: (msg: string, color?: LogColor) => void;
+  private readonly _strategyName: string;
+  private readonly _strategy: Strategy;
+  private readonly _tracker: WalletTracker;
+  private readonly _ticker: TickerTracker;
+  private readonly _alwaysLog: boolean;
+
+  constructor(opts: MarketLifecycleOptions) {
+    this.slug = opts.slug;
+    this.apiQueue = opts.apiQueue;
+    this.client = opts.client;
+    this._log = opts.log;
+    this._strategyName = opts.strategyName;
+    this._strategy = opts.strategy;
+    this._tracker = opts.tracker;
+    this._ticker = opts.ticker;
+    this._alwaysLog = opts.alwaysLog ?? false;
+
+    const recovery = opts.recovery;
     if (recovery) {
       this._state = recovery.state;
       this._clobTokenIds = recovery.clobTokenIds;
@@ -148,7 +172,7 @@ export class MarketLifecycle {
   }
 
   destroy(): void {
-    if (Math.abs(this._pnl) > 0) {
+    if (Math.abs(this._pnl) > 0 || this._alwaysLog) {
       this._marketLogger.endSlot(this.slug);
     }
     this._marketLogger.destroy();
@@ -222,7 +246,12 @@ export class MarketLifecycle {
         : undefined;
       return { openPrice: data.openPrice, gap, priceToBeat: data.openPrice };
     });
-    this._marketLogger.startSlot(this.slug, Date.now(), this.slotEndMs, this._strategyName);
+    this._marketLogger.startSlot(
+      this.slug,
+      Date.now(),
+      this.slotEndMs,
+      this._strategyName,
+    );
 
     const ctx: StrategyContext = {
       slug: this.slug,
@@ -409,10 +438,10 @@ export class MarketLifecycle {
           tokenId: pending.tokenId,
         });
         this._removePendingOrder(pending.orderId);
+        this._marketLogger.log(
+          this._createOrderEntry(pending, "filled", { shares: filledShares }),
+        );
         if (pending.onFilled) {
-          this._marketLogger.log(
-            this._createOrderEntry(pending, "filled", { shares: filledShares }),
-          );
           pending.onFilled(filledShares);
         }
       }

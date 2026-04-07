@@ -158,20 +158,20 @@ async function recoverMarket(
   logFn(
     `[startup] Resuming ${market.slug} in STOPPING with ${pendingSells.length} SELL order(s) to drain`,
   );
-  return new MarketLifecycle(
-    market.slug,
+  return new MarketLifecycle({
+    slug: market.slug,
     apiQueue,
     client,
-    logFn,
-    market.strategyName,
+    log: logFn,
+    strategyName: market.strategyName,
     strategy,
     tracker,
     ticker,
-    {
+    recovery: {
       state: "STOPPING",
       clobTokenIds: market.clobTokenIds,
       pendingOrders: pendingSells,
       orderHistory,
     },
-  );
+  });
 }

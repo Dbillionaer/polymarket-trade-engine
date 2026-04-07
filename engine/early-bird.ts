@@ -34,6 +34,7 @@ export class EarlyBird {
   private readonly _rounds: number | null; // null = unlimited
   private readonly _prod: boolean;
   private readonly _minSessionPnl: number;
+  private readonly _alwaysLog: boolean;
   private _roundsCreated = 0;
   private _tracker!: WalletTracker;
   private _ticker = new TickerTracker();
@@ -43,6 +44,7 @@ export class EarlyBird {
     slotOffset = 1,
     prod = false,
     rounds: number | null = null,
+    alwaysLog = false,
   ) {
     this._prod = prod;
     this._statePath = prod
@@ -52,6 +54,7 @@ export class EarlyBird {
     this._strategyName = strategyName ?? DEFAULT_STRATEGY;
     this._strategy = strategies[this._strategyName]!;
     this._slotOffset = slotOffset;
+    this._alwaysLog = alwaysLog;
     this._minSessionPnl = parseFloat(process.env.MAX_SESSION_LOSS ?? "3");
     if (prod) {
       this._client = new PolymarketEarlyBirdClient();
@@ -168,16 +171,17 @@ export class EarlyBird {
       if (!this._lifecycles.has(slug) && !this._completedSlugs.has(slug)) {
         this._lifecycles.set(
           slug,
-          new MarketLifecycle(
+          new MarketLifecycle({
             slug,
-            this._apiQueue,
-            this._client,
-            (msg, color) => log.write(msg, color),
-            this._strategyName,
-            this._strategy,
-            this._tracker,
-            this._ticker,
-          ),
+            apiQueue: this._apiQueue,
+            client: this._client,
+            log: (msg, color) => log.write(msg, color),
+            strategyName: this._strategyName,
+            strategy: this._strategy,
+            tracker: this._tracker,
+            ticker: this._ticker,
+            alwaysLog: this._alwaysLog,
+          }),
         );
         this._roundsCreated++;
       }

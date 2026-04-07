@@ -1,10 +1,13 @@
 #!/usr/bin/env bun
 import { readFileSync, writeFileSync } from "fs";
 import { basename } from "path";
+import { execSync } from "child_process";
 
-const logFile = process.argv[2];
+const args = process.argv.slice(2);
+const openFlag = args.includes("--open");
+const logFile = args.find((a) => !a.startsWith("--"));
 if (!logFile) {
-  console.error("Usage: bun scripts/eb-chart.ts <early-bird-{slug}.log>");
+  console.error("Usage: bun scripts/eb-chart.ts <early-bird-{slug}.log> [--open]");
   process.exit(1);
 }
 
@@ -566,3 +569,7 @@ const html = `<!DOCTYPE html>
 const outFile = logFile.replace(/\.log$/, ".html");
 writeFileSync(outFile, html);
 console.log(`Chart written → ${outFile}`);
+if (openFlag) {
+  const cmd = process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
+  execSync(`${cmd} "${outFile}"`);
+}

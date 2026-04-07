@@ -75,6 +75,7 @@ bun run index.ts [options]
 | `--slot-offset <n>` | positive integer | `1` | Which future market slot to pre-enter. `1` means the next upcoming slot, `2` means the slot after that. |
 | `--prod` | boolean flag | `false` | Run against the real Polymarket CLOB. Requires `PRIVATE_KEY`. Prompts for confirmation unless `FORCE_PROD=true`. |
 | `--rounds <n>` | integer | unlimited | Number of market rounds to trade then exit. `0` means recover existing positions only (no new entries). Omit for unlimited. |
+| `--always-log` | boolean flag | `false` | Always write the per-market NDJSON log file even if no orders were placed (i.e. PnL is zero). Useful for debugging entry conditions and order book behavior in rounds where the strategy chose not to enter. |
 
 When `--prod` is confirmed, `process.env.PROD` is set to `"true"` so that strategies can check `Env.get("PROD")` at runtime.
 
@@ -569,7 +570,7 @@ A timestamped, human-readable log of engine events: startup, lifecycle transitio
 
 **Market log** (`logs/early-bird-{slug}.log`)
 
-A structured NDJSON (newline-delimited JSON) log generated per market round. The `Logger` class writes one of these for every lifecycle that reaches the RUNNING state. It contains:
+A structured NDJSON (newline-delimited JSON) log generated per market round. By default, the `Logger` class writes one of these only when orders were placed (PnL is non-zero). Pass `--always-log` to write a log for every round regardless, which is useful for debugging rounds where the strategy chose not to enter. It contains:
 
 | Entry type | Description |
 |------------|-------------|
@@ -588,10 +589,10 @@ These structured logs are the input for the chart visualization tool.
 The `scripts/chart.ts` script parses a market log file and generates an interactive HTML chart that visualizes the entire market lifecycle. It is the primary debugging tool for understanding what happened during a market round.
 
 ```bash
-bun run scripts/chart.ts logs/early-bird-btc-updown-5m-1775241600.log
+bun run scripts/chart.ts logs/early-bird-btc-updown-5m-1775241600.log [--open]
 ```
 
-This produces an HTML file in the same directory as the log. Open it in a browser to inspect the chart.
+This produces an HTML file in the same directory as the log. Pass `--open` to automatically open it in the default browser after writing. Without the flag, open it manually to inspect the chart.
 
 The chart renders the following data on a shared time axis (x-axis = seconds remaining until market close):
 
