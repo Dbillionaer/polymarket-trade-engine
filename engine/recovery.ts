@@ -156,7 +156,7 @@ async function recoverMarket(
   logFn(
     `[startup] Resuming ${market.slug} in STOPPING with ${pendingSells.length} SELL order(s) to drain`,
   );
-  return new MarketLifecycle({
+  const lifecycle = new MarketLifecycle({
     slug: market.slug,
     apiQueue,
     client,
@@ -172,4 +172,6 @@ async function recoverMarket(
       orderHistory,
     },
   });
+  await lifecycle.setup();
+  return lifecycle;
 }

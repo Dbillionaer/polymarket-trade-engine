@@ -70,7 +70,7 @@ function loop() {
   const assetLabel = currentSlugPrefix.toUpperCase();
   const priceStr = assetPrice ? "$" + assetPrice.toLocaleString() : "Waiting...";
   const ptb = priceToBeat ? "$" + priceToBeat.toLocaleString() : "Waiting...";
-  const gapStr = gap !== null ? (gap >= 0 ? "+" : "") + gap.toFixed(0) : "--";
+  const gapStr = gap !== null ? (gap >= 0 ? "+" : "") + gap.toFixed(2) : "--";
   const priceLine = `${assetLabel}: ${priceStr}  |  To Beat: ${ptb}  |  Gap: ${gapStr}  |  ${remaining}s left`;
 
   const tickerLine = ticker.format();

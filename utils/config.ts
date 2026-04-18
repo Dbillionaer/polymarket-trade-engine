@@ -8,6 +8,9 @@ export type Config = {
   PROD: boolean;
   PRIVATE_KEY: string;
   POLY_FUNDER_ADDRESS: string;
+  BUILDER_KEY: string;
+  BUILDER_SECRET: string;
+  BUILDER_PASSPHRASE: string;
 };
 
 const ASSET_TICKER_MAP: Record<
@@ -65,6 +68,9 @@ export class Env {
     PROD: false,
     PRIVATE_KEY: "",
     POLY_FUNDER_ADDRESS: "",
+    BUILDER_KEY: "",
+    BUILDER_SECRET: "",
+    BUILDER_PASSPHRASE: "",
   };
 
   static get<T extends keyof Config>(key: T): Config[T] {

@@ -12,6 +12,7 @@ import type { CancelOrderResponse, Order } from "../utils/trading.ts";
 import type { WalletTracker } from "./wallet-tracker.ts";
 import type { TickerTracker } from "../tracker/ticker";
 import { slotFromSlug } from "../utils/slot.ts";
+import { Env } from "../utils/config.ts";
 
 export type LifecycleState = "INIT" | "RUNNING" | "STOPPING" | "DONE";
 
@@ -69,6 +70,7 @@ export class MarketLifecycle {
   private _orderBook = new OrderBook();
 
   private _clobTokenIds: [string, string] | null = null;
+  private _conditionId: string | null = null;
 
   private _feeRate = 0;
   private _pendingOrders: PendingOrder[] = [];
@@ -219,18 +221,26 @@ export class MarketLifecycle {
     }
   }
 
-  private async _handleInit(): Promise<void> {
+  /** Fetch market metadata (conditionId, tokenIds, feeRate). Called by both
+   *  normal init and recovery so both paths have the same market context. */
+  async setup(): Promise<void> {
     await this.apiQueue.queueEventDetails(this.slug);
     const event = this.apiQueue.eventDetails.get(this.slug);
     if (!event) return;
-
     const market = event.markets[0];
     if (!market) return;
 
-    const tokenIds: string[] = JSON.parse(market.clobTokenIds);
-    this._clobTokenIds = [tokenIds[0]!, tokenIds[1]!];
+    this._conditionId = market.conditionId;
+    if (!this._clobTokenIds) {
+      const tokenIds: string[] = JSON.parse(market.clobTokenIds);
+      this._clobTokenIds = [tokenIds[0]!, tokenIds[1]!];
+    }
+    this._feeRate ??= market.feeSchedule?.rate ?? 0;
+  }
 
-    this._feeRate = market.feeSchedule?.rate ?? 0;
+  private async _handleInit(): Promise<void> {
+    await this.setup();
+    if (!this._clobTokenIds) return;
 
     const slot = slotFromSlug(this.slug);
     const delayMs = Math.max(0, slot.startTime - Date.now());
@@ -359,6 +369,7 @@ export class MarketLifecycle {
       }
       await this._waitForResolution();
       this._computePnl();
+      await this._autoRedeem();
       this._state = "DONE";
       return;
     }
@@ -369,8 +380,11 @@ export class MarketLifecycle {
     if (this._pendingOrders.length === 0 && this._inFlight === 0) {
       if (this._hasUnfilledPositions()) {
         await this._waitForResolution();
+        this._computePnl();
+        await this._autoRedeem();
+      } else {
+        this._computePnl();
       }
-      this._computePnl();
       this._state = "DONE";
     }
   }
@@ -396,6 +410,31 @@ export class MarketLifecycle {
       snapshot.map((p, i) => [p.orderId, statuses[i]!]),
     );
 
+    const commitFill = (pending: PendingOrder, shares: number, fee = 0) => {
+      if (pending.action === "buy") {
+        this._tracker.onBuyFilled(pending.orderId, pending.tokenId, shares);
+      } else {
+        this._tracker.onSellFilled(
+          pending.orderId,
+          pending.tokenId,
+          pending.price,
+          shares,
+        );
+      }
+      this._orderHistory.push({
+        action: pending.action,
+        price: pending.price,
+        shares,
+        fee,
+        tokenId: pending.tokenId,
+      });
+      this._removePendingOrder(pending.orderId);
+      this._marketLogger.log(
+        this._createOrderEntry(pending, "filled", { shares }),
+      );
+      if (pending.onFilled) pending.onFilled(shares);
+    };
+
     for (const pending of snapshot) {
       // Skip if already removed by a prior callback in this tick
       if (!this._pendingOrders.includes(pending)) continue;
@@ -406,7 +445,11 @@ export class MarketLifecycle {
         // Still live — only check expiry
         if (Date.now() >= pending.expireAtMs) {
           await this._cancelOrders([pending.orderId]);
-          if (pending.onExpired) {
+          const partialShares = order.actualShares ?? 0;
+          if (partialShares > 0) {
+            // Partial fill — treat matched shares as a fill, ignore unmatched remainder
+            commitFill(pending, partialShares);
+          } else if (pending.onExpired) {
             this._marketLogger.log(this._createOrderEntry(pending, "expired"));
             await pending.onExpired();
           }
@@ -425,51 +468,25 @@ export class MarketLifecycle {
         this._marketLogger.log(
           this._createOrderEntry(pending, "failed", { reason }),
         );
-        if (pending.onFailed) {
-          await pending.onFailed(reason);
-        }
+        if (pending.onFailed) await pending.onFailed(reason);
         continue;
       }
 
       if (order.status === "filled") {
-        const grossShares = order.actualShares > 0 ? order.actualShares : order.shares;
+        const grossShares =
+          order.actualShares > 0 ? order.actualShares : order.shares;
         let fee = 0;
         if (pending.orderType === "FOK" && this._feeRate > 0) {
           // Taker fee: fee = C × feeRate × p × (1 - p)
           fee =
             grossShares * this._feeRate * pending.price * (1 - pending.price);
         }
-
-        let shares = grossShares;
-        if (pending.action === "buy" && fee > 0) {
-          // Buy fee is deducted in shares, avoids double-counting since fee we price * grossed shares in pnl
-          shares = grossShares - fee / pending.price;
-        }
-
-        if (pending.action === "buy") {
-          this._tracker.onBuyFilled(pending.orderId, pending.tokenId, shares);
-        } else {
-          this._tracker.onSellFilled(
-            pending.orderId,
-            pending.tokenId,
-            pending.price,
-            shares,
-          );
-        }
-        this._orderHistory.push({
-          action: pending.action,
-          price: pending.price,
-          shares,
-          fee,
-          tokenId: pending.tokenId,
-        });
-        this._removePendingOrder(pending.orderId);
-        this._marketLogger.log(
-          this._createOrderEntry(pending, "filled", { shares }),
-        );
-        if (pending.onFilled) {
-          pending.onFilled(shares);
-        }
+        // Buy fee is deducted in shares, avoids double-counting since fee we price * grossed shares in pnl
+        const shares =
+          pending.action === "buy" && fee > 0
+            ? grossShares - fee / pending.price
+            : grossShares;
+        commitFill(pending, shares, fee);
       }
     }
   }
@@ -837,6 +854,19 @@ export class MarketLifecycle {
       if (shares > 0) return true;
     }
     return false;
+  }
+
+  private async _autoRedeem(): Promise<void> {
+    if (!Env.get("PROD")) return;
+    if (!this._conditionId) return; // belt-and-suspenders
+
+    this._log(`[${this.slug}] Redeeming positions...`, "dim");
+    try {
+      await this.client.redeemPositions(this._conditionId, true);
+      this._log(`[${this.slug}] Redemption successful`, "green");
+    } catch (e) {
+      this._log(`[${this.slug}] Redemption failed: ${e}`, "red");
+    }
   }
 
   private async _waitForResolution(): Promise<void> {

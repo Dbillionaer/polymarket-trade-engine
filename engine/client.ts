@@ -8,7 +8,31 @@ import {
   type TickSize,
 } from "@polymarket/clob-client";
 import { Wallet } from "@ethersproject/wallet";
+import { RelayClient, RelayerTxType } from "@polymarket/builder-relayer-client";
+import { BuilderConfig } from "@polymarket/builder-signing-sdk";
+import { createWalletClient, encodeFunctionData, http, zeroHash } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { polygon } from "viem/chains";
 import { Env } from "../utils/config";
+
+const RELAYER_URL = "https://relayer-v2.polymarket.com";
+const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+
+const CTF_REDEEM_ABI = [
+  {
+    inputs: [
+      { internalType: "address", name: "collateralToken", type: "address" },
+      { internalType: "bytes32", name: "parentCollectionId", type: "bytes32" },
+      { internalType: "bytes32", name: "conditionId", type: "bytes32" },
+      { internalType: "uint256[]", name: "indexSets", type: "uint256[]" },
+    ],
+    name: "redeemPositions",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
 
 function simulateDelay() {
   const ms = 150 + Math.random() * 10; // 150–160ms
@@ -48,6 +72,9 @@ export interface EarlyBirdClient {
   getAvailableShares(tokenId: string): Promise<number>;
   updateUSDCBalance(): Promise<void>;
   updateAvailableShares(tokenId: string): Promise<void>;
+
+  /** Redeem winning CTF positions for a resolved market. No-op in sim mode. */
+  redeemPositions(conditionId: string, silent?: boolean): Promise<void>;
 }
 
 export type BookSnapshot = {
@@ -245,6 +272,11 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
   async updateUSDCBalance(): Promise<void> {}
 
   async updateAvailableShares(_tokenId: string): Promise<void> {}
+
+  async redeemPositions(
+    _conditionId: string,
+    _silent?: boolean,
+  ): Promise<void> {}
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +302,7 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
   private readonly _host = "https://clob.polymarket.com";
   private readonly _signer: Wallet;
   private readonly _funder: string | undefined;
+  private readonly _builderConfig: BuilderConfig;
 
   constructor() {
     const privateKey = Env.get("PRIVATE_KEY");
@@ -278,6 +311,24 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
     if (!privateKey?.startsWith("0x")) {
       throw new Error("PRIVATE_KEY env var must be set (0x-prefixed)");
     }
+
+    const builderKey = Env.get("BUILDER_KEY");
+    const builderSecret = Env.get("BUILDER_SECRET");
+    const builderPassphrase = Env.get("BUILDER_PASSPHRASE");
+
+    if (!builderKey || !builderSecret || !builderPassphrase) {
+      throw new Error(
+        "BUILDER_KEY, BUILDER_SECRET, BUILDER_PASSPHRASE env vars must be set",
+      );
+    }
+
+    this._builderConfig = new BuilderConfig({
+      localBuilderCreds: {
+        key: builderKey,
+        secret: builderSecret,
+        passphrase: builderPassphrase,
+      },
+    });
 
     this._signer = new Wallet(privateKey);
   }
@@ -406,5 +457,49 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
       asset_type: AssetType.CONDITIONAL,
       token_id: tokenId,
     });
+  }
+
+  async redeemPositions(conditionId: string, silent = false): Promise<void> {
+    const account = privateKeyToAccount(
+      this._signer.privateKey as `0x${string}`,
+    );
+    const walletClient = createWalletClient({
+      account,
+      chain: polygon,
+      transport: http("https://polygon-bor-rpc.publicnode.com"),
+    });
+    const relay = new RelayClient(
+      RELAYER_URL,
+      137,
+      walletClient,
+      this._builderConfig,
+      RelayerTxType.PROXY,
+    );
+    const data = encodeFunctionData({
+      abi: CTF_REDEEM_ABI,
+      functionName: "redeemPositions",
+      args: [USDC_ADDRESS, zeroHash, conditionId as `0x${string}`, [1n, 2n]],
+    });
+
+    const origLog = console.log;
+    const origInfo = console.info;
+    if (silent) {
+      console.log = () => {};
+      console.info = () => {};
+    }
+    try {
+      const response = await relay.execute(
+        [{ to: CTF_ADDRESS, data, value: "0" }],
+        "redeem positions",
+      );
+      const result = await response.wait();
+      if (!result)
+        throw new Error(`Redemption relay failed for ${conditionId}`);
+    } finally {
+      if (silent) {
+        console.log = origLog;
+        console.info = origInfo;
+      }
+    }
   }
 }

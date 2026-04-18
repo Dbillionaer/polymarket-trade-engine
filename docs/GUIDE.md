@@ -20,7 +20,8 @@ This document is the primary reference for developing strategies on the Polymark
 12. [State Persistence and Recovery](#state-persistence-and-recovery)
 13. [Best Practices](#best-practices)
 14. [Production Setup](#production-setup)
-15. [Debugging and Visualization](#debugging-and-visualization)
+15. [Redemption](#redemption)
+16. [Debugging and Visualization](#debugging-and-visualization)
 
 ---
 
@@ -258,8 +259,8 @@ React to outcomes via callbacks on each `OrderRequest`:
 
 | Callback | Signature | When it fires |
 |----------|-----------|---------------|
-| `onFilled` | `(filledShares: number) => void` | Order was fully filled. `filledShares` may differ from the requested amount due to partial fills. Always use this value. |
-| `onExpired` | `() => void` | Order was auto-cancelled because its expiration deadline was reached. Each order carries an `expireAtMs` timestamp (Unix milliseconds); the engine checks this on every tick and cancels the order once the current time passes it. Set this strategically -- for example, expire sell orders 30 seconds before slot end to leave time for an emergency exit in this callback. |
+| `onFilled` | `(filledShares: number) => void` | Order filled (fully or partially). Fires when the order is fully matched on the CLOB, **or** when the order expires with some shares already matched — in which case `filledShares` reflects only the matched portion and the unmatched remainder is discarded. Always use this value rather than the originally requested share count. |
+| `onExpired` | `() => void` | Order was auto-cancelled because its expiration deadline was reached **and no shares were matched**. Each order carries an `expireAtMs` timestamp (Unix milliseconds); the engine checks this on every tick and cancels the order once the current time passes it. Set this strategically -- for example, expire sell orders 30 seconds before slot end to leave time for an emergency exit in this callback. |
 | `onFailed` | `(reason: string) => void` | Order was not placed or was cancelled by the exchange. |
 
 Callbacks may call `ctx.postOrders()` again to chain further orders.
@@ -408,7 +409,10 @@ postOrders([order])
               +---> GTC: order rests on book
               |         |
               |         +---> Fills on CLOB       ---> onFilled(filledShares)
-              |         +---> expireAtMs reached  ---> engine cancels ---> onExpired()
+              |         +---> expireAtMs reached  ---> engine cancels
+              |         |         |
+              |         |         +---> Partially filled   ---> onFilled(matchedShares)
+              |         |         +---> Not filled at all  ---> onExpired()
               |         +---> Exchange cancels    ---> onFailed(reason)
               |         +---> STOPPING cancels it ---> (no callback, cleanup only)
               |
@@ -564,7 +568,18 @@ You need a Polygon-compatible wallet with a private key. This wallet will be use
 
 Fund the wallet with USDC on the Polygon network. This is the settlement currency on Polymarket.
 
-### 2. Configure the .env File
+### 2. Obtain Builder API Credentials
+
+The engine uses Polymarket's gasless relayer to redeem resolved positions on-chain without paying gas fees. This requires a **Builder API key**, which is separate from your wallet private key.
+
+To obtain one:
+
+1. Log in to [polymarket.com](https://polymarket.com) and complete profile creation.
+2. Go to **Settings → Builder Codes**.
+3. Click **Create New** to generate a key/secret/passphrase triplet.
+4. Save all three values — the secret and passphrase are only shown once.
+
+### 3. Configure the .env File
 
 Create a `.env` file in the project root with the following variables:
 
@@ -577,6 +592,12 @@ PRIVATE_KEY=0x...
 # You can find it in your Polymarket account settings or by inspecting
 # your deposit transaction on Polygonscan.
 POLY_FUNDER_ADDRESS=0x...
+
+# Builder API credentials for the gasless relayer (Settings > Builder Codes).
+# Required for on-chain redemption of resolved positions.
+BUILDER_KEY=...
+BUILDER_SECRET=...
+BUILDER_PASSPHRASE=...
 
 # Asset to trade. Options: btc, eth, xrp, sol, doge
 MARKET_ASSET=btc
@@ -593,7 +614,7 @@ MAX_SESSION_LOSS=3
 FORCE_PROD=false
 ```
 
-### 3. Run in Production
+### 4. Run in Production
 
 ```bash
 bun run index.ts --strategy <your-strategy> --prod
@@ -607,7 +628,7 @@ Run in PRODUCTION mode with real funds? Enter Y to confirm:
 
 Type `Y` to proceed. To bypass this prompt (e.g. for automated runs), set `FORCE_PROD=true` in your `.env` file.
 
-### 4. Strategy Production Guard
+### 5. Strategy Production Guard
 
 Strategies can check whether they are running in production via `Env.get("PROD")`. The simulation strategies included in this repository block execution in production mode by design:
 
@@ -626,7 +647,43 @@ When writing a production strategy, remove this guard and ensure your logic acco
 - Run your strategy in simulation for at least 10 rounds to validate behavior.
 - Set `MAX_SESSION_LOSS` to an appropriate value for your risk tolerance.
 - Confirm that `PRIVATE_KEY` and `POLY_FUNDER_ADDRESS` are correct and correspond to the same Polymarket account.
+- Confirm that `BUILDER_KEY`, `BUILDER_SECRET`, and `BUILDER_PASSPHRASE` are set (required for on-chain redemption).
 - Do not commit your `.env` file to version control. The `.gitignore` already excludes it.
+
+---
+
+## Redemption
+
+When a market resolves, winning token holders must redeem their positions on-chain to convert them back to USDC. The engine handles this automatically for strategies that hold positions to resolution, and a standalone batch script is provided for manual or retroactive redemptions.
+
+### Auto-Redeem (Engine)
+
+When a lifecycle completes and transitions to DONE, the engine automatically calls `redeemPositions` on-chain for the resolved market — but only in production mode (`PROD=true`) and only when the lifecycle went through `_waitForResolution` (i.e. the strategy held a position to market close rather than selling it).
+
+This is used by the `buy-high` strategy, which buys at 0.98/0.99 and holds to resolution without placing any sell orders.
+
+Redemption uses Polymarket's gasless relayer (`relayer-v2.polymarket.com`), so no MATIC is required. If redemption fails (e.g. already redeemed, network error), the error is logged and the lifecycle still transitions to DONE — it does not block shutdown.
+
+### Batch Redeem Script (scripts/redeem.ts)
+
+The redeem script fetches all currently redeemable positions for your proxy wallet from the Polymarket Data API and submits on-chain redemptions for each one via the gasless relayer.
+
+```bash
+# Check what positions are redeemable (no transactions sent)
+bun scripts/redeem.ts --dry-run --prod
+
+# Redeem all resolved positions on-chain
+bun scripts/redeem.ts --prod
+```
+
+| Flag | Description |
+|------|-------------|
+| `--prod` | Enable real on-chain redemption. Without this flag the script runs in sim mode and only prints what would be redeemed. |
+| `--dry-run` | Combined with `--prod`: prints redeemable positions without sending transactions. |
+
+The script uses `POLY_FUNDER_ADDRESS` to look up positions and `BUILDER_KEY/SECRET/PASSPHRASE` to authenticate with the relayer. Both must be set in `.env`.
+
+Run this script periodically (e.g. after each session) to ensure resolved positions are converted back to USDC.
 
 ---
 
