@@ -172,12 +172,12 @@ export class MarketLifecycle {
    */
   shutdown(): void {
     if (this._state === "INIT") {
-      this._state = "DONE";
+      this._setState("DONE");
       return;
     }
     if (this._state === "RUNNING") {
       this._buyBlocked = true;
-      this._state = "STOPPING";
+      this._setState("STOPPING");
     }
     // STOPPING already — no-op
   }
@@ -192,6 +192,12 @@ export class MarketLifecycle {
     this._strategyCleanup?.();
     this._orderBook.destroy();
     this._log(`[${this.slug}] destroy()`, "dim");
+  }
+
+  private _setState(next: LifecycleState): void {
+    if (this._state === next) return;
+    this._log(`[${this.slug}] state: ${this._state} → ${next}`, "dim");
+    this._state = next;
   }
 
   async tick(): Promise<void> {
@@ -314,7 +320,7 @@ export class MarketLifecycle {
 
     const cleanup = await this._strategy(ctx);
     if (cleanup) this._strategyCleanup = cleanup;
-    this._state = "RUNNING";
+    this._setState("RUNNING");
   }
 
   /**
@@ -323,7 +329,7 @@ export class MarketLifecycle {
    */
   private async _handleRunning(): Promise<void> {
     if (Date.now() >= this.slotEndMs) {
-      this._state = "STOPPING";
+      this._setState("STOPPING");
       this._log(
         `[${this.slug}] Market closed — transitioning to STOPPING`,
         "yellow",
@@ -333,13 +339,15 @@ export class MarketLifecycle {
 
     await this._processPendingOrders();
 
-    // If no pending orders remain, no placements in flight, and no strategy holds, we're done
+    // If no pending orders remain, no placements in flight, no strategy holds,
+    // and no unfilled positions that a stop-loss may still sell, we're done
     if (
       this._pendingOrders.length === 0 &&
       this._inFlight === 0 &&
-      this._strategyLocks === 0
+      this._strategyLocks === 0 &&
+      !this._hasUnfilledPositions()
     ) {
-      this._state = "STOPPING";
+      this._setState("STOPPING");
     }
   }
 
@@ -370,7 +378,7 @@ export class MarketLifecycle {
       await this._waitForResolution();
       this._computePnl();
       await this._autoRedeem();
-      this._state = "DONE";
+      this._setState("DONE");
       return;
     }
 
@@ -385,7 +393,7 @@ export class MarketLifecycle {
       } else {
         this._computePnl();
       }
-      this._state = "DONE";
+      this._setState("DONE");
     }
   }
 
@@ -412,7 +420,12 @@ export class MarketLifecycle {
 
     const commitFill = (pending: PendingOrder, shares: number, fee = 0) => {
       if (pending.action === "buy") {
-        this._tracker.onBuyFilled(pending.orderId, pending.tokenId, shares);
+        this._tracker.onBuyFilled(
+          pending.orderId,
+          pending.tokenId,
+          pending.price,
+          shares,
+        );
       } else {
         this._tracker.onSellFilled(
           pending.orderId,
@@ -458,6 +471,7 @@ export class MarketLifecycle {
       }
 
       // null within grace period — CLOB may not have indexed the order yet
+      // this is only for prod client not simulated client
       if (!order && Date.now() - pending.placedAtMs <= CLOB_INDEX_GRACE_MS)
         continue;
 

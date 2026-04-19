@@ -233,7 +233,11 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
       }
     }
 
-    return { ...order, actualShares: order.shares };
+    // Live = nothing matched yet (mirrors real CLOB where size_matched = 0 for unmatched orders)
+    return {
+      ...order,
+      actualShares: order.status === "live" ? 0 : order.shares,
+    };
   }
 
   async cancelOrder(orderId: string): Promise<void> {

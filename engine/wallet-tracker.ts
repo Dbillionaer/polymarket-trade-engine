@@ -63,11 +63,16 @@ export class WalletTracker {
   }
 
   /** Buy filled: USDC leaves wallet, shares added optimistically. */
-  onBuyFilled(orderId: string, tokenId: string, shareCount: number): void {
+  onBuyFilled(orderId: string, tokenId: string, price: number, shareCount: number): void {
     const cost = this._reservedForBuys.get(orderId);
-    if (cost == null) return;
-    this._reservedForBuys.delete(orderId);
-    this._balance -= cost;
+    if (cost != null) {
+      // Normal fill: reservation still held, deduct full reserved cost
+      this._reservedForBuys.delete(orderId);
+      this._balance -= cost;
+    } else {
+      // Partial fill after cancel: reservation already unlocked, deduct actual cost
+      this._balance -= price * shareCount;
+    }
 
     const current = this._shares.get(tokenId) ?? 0;
     this._shares.set(tokenId, current + shareCount);
