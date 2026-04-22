@@ -75,7 +75,7 @@ export class APIQueue {
       // The API now requires TLSv1.3 with mlkem768x25519 which is only available
       // in latest curl 8.19.0. Bun or Node is compiled with latest BoringSSL
       // which causes ECONNRESET.
-      useCurl: true,
+      useCurl: false,
       totalRetry: Number.MAX_VALUE,
       abort: controller.signal,
       resolveWhen: async (res) => {
