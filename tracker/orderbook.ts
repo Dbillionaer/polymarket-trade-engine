@@ -298,9 +298,10 @@ export class OrderBook {
   }
 
   /** Order book depth table + net gain as an array of display lines */
-  getDisplayLines(amount: number): string[] {
+  getDisplayLines(): string[] {
     const { apiSymbol } = Env.getAssetConfig();
-    if (this.assetIds.length < 2) return [`${apiSymbol} Order Book: Waiting...`];
+    if (this.assetIds.length < 2)
+      return [`${apiSymbol} Order Book: Waiting...`];
 
     const upBook = this.books.get(this.assetIds[0]!);
     const downBook = this.books.get(this.assetIds[1]!);

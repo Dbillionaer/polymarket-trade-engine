@@ -3,11 +3,13 @@
 process.env["TICKER"] = "polymarket,binance,coinbase";
 
 const windowArgIdx = process.argv.indexOf("--window");
-const windowArgVal = windowArgIdx !== -1 ? process.argv[windowArgIdx + 1] : "5m";
+const windowArgVal =
+  windowArgIdx !== -1 ? process.argv[windowArgIdx + 1] : "5m";
 process.env["MARKET_WINDOW"] = windowArgVal;
 
 const assetArgIdx = process.argv.indexOf("--asset");
-const assetArgVal = assetArgIdx !== -1 ? process.argv[assetArgIdx + 1] : undefined;
+const assetArgVal =
+  assetArgIdx !== -1 ? process.argv[assetArgIdx + 1] : undefined;
 if (assetArgVal) process.env["MARKET_ASSET"] = assetArgVal;
 
 import { APIQueue } from "../tracker/api-queue";
@@ -17,10 +19,10 @@ import { toIST } from "../utils/date";
 import { getSlotTS, setMarketOffset } from "../utils/slot";
 import { Env } from "../utils/config";
 import { TerminalDisplay } from "../utils/terminal";
-import { BUY_AMOUNT } from "../utils/constants";
 
 const marketArgIdx = process.argv.indexOf("--market");
-const marketArgVal = marketArgIdx !== -1 ? process.argv[marketArgIdx + 1] : undefined;
+const marketArgVal =
+  marketArgIdx !== -1 ? process.argv[marketArgIdx + 1] : undefined;
 if (marketArgVal) setMarketOffset(marketArgVal);
 
 const continuous = process.argv.includes("--continuous");
@@ -60,7 +62,9 @@ function loop() {
   const elapsed = Math.floor(Date.now() / 1000 - currentSlot.startTime / 1000);
   const remaining = 300 - elapsed;
   const assetPrice = ticker.price;
-  const priceToBeat = apiQueue.marketResult.get(currentSlot.startTime)?.openPrice;
+  const priceToBeat = apiQueue.marketResult.get(
+    currentSlot.startTime,
+  )?.openPrice;
   const gap =
     assetPrice !== undefined && priceToBeat !== undefined
       ? assetPrice - priceToBeat
@@ -68,7 +72,9 @@ function loop() {
 
   const { slugPrefix: currentSlugPrefix } = Env.getAssetConfig();
   const assetLabel = currentSlugPrefix.toUpperCase();
-  const priceStr = assetPrice ? "$" + assetPrice.toLocaleString() : "Waiting...";
+  const priceStr = assetPrice
+    ? "$" + assetPrice.toLocaleString()
+    : "Waiting...";
   const ptb = priceToBeat ? "$" + priceToBeat.toLocaleString() : "Waiting...";
   const gapStr = gap !== null ? (gap >= 0 ? "+" : "") + gap.toFixed(2) : "--";
   const priceLine = `${assetLabel}: ${priceStr}  |  To Beat: ${ptb}  |  Gap: ${gapStr}  |  ${remaining}s left`;
@@ -82,7 +88,7 @@ function loop() {
     priceLine,
     ...(tickerLine ? [tickerLine] : []),
     "\r",
-    ...orderBook.getDisplayLines(BUY_AMOUNT),
+    ...orderBook.getDisplayLines(),
   ]);
 
   setTimeout(() => loop());
