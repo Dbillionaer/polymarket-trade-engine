@@ -117,6 +117,27 @@ This distinction matters for automated trading. If you buy 6 shares with a FOK o
 
 For the full fee schedule and current rates, see the [Polymarket fee documentation](https://docs.polymarket.com/trading/fees#fee-structure).
 
+### Partial Fills and On-Chain Arithmetic
+
+Even with no fees, you may receive slightly fewer shares than requested. When a GTC order is matched against multiple counterparties on-chain (e.g. two sellers each filling part of your order), each fill independently computes the share amount using integer division:
+
+```
+shares_received = (usdc_filled × takerAmount) / makerAmount
+```
+
+The [CTF Exchange `calculateTakingAmount`](https://github.com/Polymarket/ctf-exchange/blob/main/src/exchange/libraries/CalculatorHelper.sol#L17) uses integer division which truncates — it does not round. Each split fill loses a fraction, and the losses accumulate:
+
+```
+  GTC buy 6 shares @ $0.51 — filled in two tranches:
+
+  Tranche 1: 5.31 shares   → integer division truncates down slightly
+  Tranche 2: 0.684806 shares → truncates again
+                               ─────────────────
+  Actual credited: 5.994806 shares (not 6)
+```
+
+This is not a fee. Your full USDC was spent, and the order shows as fully matched. The shortfall is purely a rounding artefact of splitting settlement across multiple on-chain transactions. It is typically sub-cent in value but matters if you immediately try to sell the exact amount you requested.
+
 ## Shares and Pricing
 
 Share prices on Polymarket range from $0.00 to $1.00, and this range directly maps to probability. A share priced at $0.45 implies a 45% chance of that outcome occurring, according to the market.
@@ -206,6 +227,8 @@ At the end of the five-minute window, the market resolves based on the final BTC
 Any shares you hold at the moment of resolution are automatically settled. There is no action required on your part -- the payout happens whether you are watching or not. This is why position management before resolution is critical. If you are holding the wrong side when the clock runs out, there is no exit.
 
 To put it concretely: if you bought 100 shares of UP at $0.45 and BTC finishes above the price to beat, you receive $100.00 for a net profit of $55.00. If BTC finishes below, you receive nothing and your $45.00 is gone.
+
+Resolution does not automatically pay you out. Winners must explicitly redeem their shares — either through the Polymarket UI or programmatically — to convert them back to USDC. Until redeemed, winning shares remain locked in the CTF contract and contribute to the market's open interest.
 
 ---
 

@@ -259,7 +259,7 @@ React to outcomes via callbacks on each `OrderRequest`:
 
 | Callback | Signature | When it fires |
 |----------|-----------|---------------|
-| `onFilled` | `(filledShares: number) => void` | Order filled (fully or partially). Fires when the order is fully matched on the CLOB, **or** when the order expires with some shares already matched — in which case `filledShares` reflects only the matched portion and the unmatched remainder is discarded. Always use this value rather than the originally requested share count. |
+| `onFilled` | `(filledShares: number) => void` | Order fully matched on the CLOB, or expired with a partial match (unmatched remainder discarded). `filledShares` may be less than requested: GTC fills split across multiple counterparties lose a few units to on-chain integer truncation; FOK fills are reduced by the taker fee. Always use this value instead of the originally requested share count. |
 | `onExpired` | `() => void` | Order was auto-cancelled because its expiration deadline was reached **and no shares were matched**. Each order carries an `expireAtMs` timestamp (Unix milliseconds); the engine checks this on every tick and cancels the order once the current time passes it. Set this strategically -- for example, expire sell orders 30 seconds before slot end to leave time for an emergency exit in this callback. |
 | `onFailed` | `(reason: string) => void` | Order was not placed or was cancelled by the exchange. |
 

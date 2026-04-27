@@ -111,7 +111,10 @@ function isSimFilled(
 }
 
 /** How long after a buy fills before the sim allows sells on that token. */
-const SIM_BALANCE_DELAY_MS = parseInt(process.env.SIM_BALANCE_DELAY_MS ?? "4000", 10);
+const SIM_BALANCE_DELAY_MS = parseInt(
+  process.env.SIM_BALANCE_DELAY_MS ?? "4000",
+  10,
+);
 
 export class EarlyBirdSimClient implements EarlyBirdClient {
   private _orders = new Map<string, Order>();
@@ -368,6 +371,8 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
           price: req.price,
           size: req.shares,
           side: req.action === "buy" ? Side.BUY : Side.SELL,
+          // For maker (GTC, GTD) orders feeRateBps is 0, we still pass it
+          // because the operator (Polymarket) will correct that for ourselves.
           feeRateBps: req.feeRateBps,
         };
         return this.clob.orderBuilder.buildOrder(userOrder, {
