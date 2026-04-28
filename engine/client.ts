@@ -608,11 +608,6 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
       const result = await response.wait();
       if (!result)
         throw new Error(`Redemption relay failed for ${conditionId}`);
-
-      // const usdceBalance = await this.getTokenBalance(
-      //   USDC_ADDRESS as `0x${string}`,
-      // );
-      // if (usdceBalance > 0n) await this.wrapUSDC(usdceBalance);
     } finally {
       if (silent) {
         console.log = origLog;

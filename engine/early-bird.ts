@@ -89,6 +89,13 @@ export class EarlyBird {
       await this._client.updateUSDCBalance();
       initialBalance = await this._client.getUSDCBalance();
       log.write(`[startup] On-chain balance: $${initialBalance.toFixed(2)}`);
+      if (initialBalance === 0) {
+        console.error(
+          "Wallet balance is $0.00. Fund your funder wallet with pUSD before starting the engine.\n" +
+          "Run `bun scripts/pusd.ts wrap` to convert USDC.e → pUSD, or see docs/MIGRATE_V2.md.",
+        );
+        process.exit(1);
+      }
     } else {
       initialBalance = parseFloat(process.env.WALLET_BALANCE ?? "50");
       log.write(`[startup] Sim balance: $${initialBalance.toFixed(2)}`);

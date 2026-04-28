@@ -526,6 +526,7 @@ describe("Test 10: strategy cleanup is invoked on STOPPING transition", () => {
 
       // Advance past slot end to trigger RUNNING → STOPPING (→ DONE since no orders)
       await runner.advanceTo(SLOT_END_MS + 500);
+      await runner.waitForState("STOPPING", SLOT_END_MS + 1000);
 
       expect(cleanupCalled).toBe(true);
     },

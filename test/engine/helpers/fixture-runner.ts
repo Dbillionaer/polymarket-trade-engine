@@ -169,14 +169,17 @@ export class FixtureRunner {
   }
 
   /**
-   * Poll by advancing 1s steps until lifecycle.state === target or timeoutTs exceeded.
+   * Poll by advancing 1s steps until the lifecycle has reached or passed `state`.
+   * Uses the canonical state order INIT → RUNNING → STOPPING → DONE, so
+   * waitForState("STOPPING") returns immediately if the lifecycle is already DONE.
    */
   async waitForState(
     state: LifecycleState,
     timeoutTs = SLOT_END_MS + 120_000,
   ): Promise<void> {
+    const ORDER: LifecycleState[] = ["INIT", "RUNNING", "STOPPING", "DONE"];
     const STEP = 1000;
-    while (this.lifecycle.state !== state) {
+    while (ORDER.indexOf(this.lifecycle.state) < ORDER.indexOf(state)) {
       if (this.clock.now >= timeoutTs) {
         throw new Error(
           `waitForState("${state}") timed out at ts=${this.clock.now}; current="${this.lifecycle.state}"`,

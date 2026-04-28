@@ -37,7 +37,7 @@ The script reads `PRIVATE_KEY`, `POLY_FUNDER_ADDRESS`, and `BUILDER_KEY/SECRET/P
 ### Option B — Polymarket UI
 
 1. Go to [polymarket.com](https://polymarket.com) and log in.
-2. Look for a **"Balance migration"** banner or button, or open your profile and look for an **"Activate deposit"** prompt at the top.
+2. Look for a **"Balance migration"** banner or button, or open your profile and look for an **"Confirm pending deposit"** prompt at the top.
 3. Follow the on-screen steps — Polymarket will wrap your existing USDC.e balance to pUSD automatically.
 
 ### Verify the balance
