@@ -3,36 +3,46 @@ import {
   ClobClient,
   Side,
   OrderType as ClobOrderType,
-  type UserOrder,
+  type UserOrderV2 as UserOrder,
   AssetType,
   type TickSize,
-} from "@polymarket/clob-client";
+  Chain,
+} from "@polymarket/clob-client-v2";
 import { Wallet } from "@ethersproject/wallet";
 import { RelayClient, RelayerTxType } from "@polymarket/builder-relayer-client";
 import { BuilderConfig } from "@polymarket/builder-signing-sdk";
-import { createWalletClient, encodeFunctionData, http, zeroHash } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  encodeFunctionData,
+  http,
+  parseAbi,
+  zeroHash,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
 import { Env } from "../utils/config";
 
 const RELAYER_URL = "https://relayer-v2.polymarket.com";
-const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+const POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com";
+const CTF_ADDRESS = "0xADa100874d00e3331D00F2007a9c336a65009718";
 const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const pUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const ONRAMP = "0x93070a847efEf7F70739046A929D47a521F5B8ee" as const;
+const OFFRAMP = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854" as const;
 
-const CTF_REDEEM_ABI = [
-  {
-    inputs: [
-      { internalType: "address", name: "collateralToken", type: "address" },
-      { internalType: "bytes32", name: "parentCollectionId", type: "bytes32" },
-      { internalType: "bytes32", name: "conditionId", type: "bytes32" },
-      { internalType: "uint256[]", name: "indexSets", type: "uint256[]" },
-    ],
-    name: "redeemPositions",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
-] as const;
+const ERC20_ABI = parseAbi([
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function balanceOf(address owner) view returns (uint256)",
+]);
+const RAMP_ABI = parseAbi([
+  "function wrap(address _asset, address _to, uint256 _amount)",
+  "function unwrap(address _asset, address _to, uint256 _amount)",
+]);
+
+const CTF_REDEEM_ABI = parseAbi([
+  "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+]);
 
 function simulateDelay() {
   const ms = parseInt(process.env.SIM_DELAY_MS ?? "", 10);
@@ -47,7 +57,7 @@ export type MultiOrderRequest = {
   shares: number;
   tickSize: string;
   negRisk: boolean;
-  feeRateBps: number;
+  feeRateBps: number; // deprecated field not used in v2
   orderType?: "GTC" | "FOK";
 };
 
@@ -76,6 +86,13 @@ export interface EarlyBirdClient {
 
   /** Redeem winning CTF positions for a resolved market. No-op in sim mode. */
   redeemPositions(conditionId: string, silent?: boolean): Promise<void>;
+
+  /** Wrap USDC.e -> pUSD via the Polymarket relayer. No-op in sim mode. */
+  wrapUSDC(amount: bigint): Promise<void>;
+  /** Unwrap pUSD -> USDC.e via the Polymarket relayer. No-op in sim mode. */
+  unwrapUSDC(amount: bigint): Promise<void>;
+  /** Read the funder wallet's on-chain ERC-20 balance for any token. Returns 0n in sim mode. */
+  getTokenBalance(token: `0x${string}`): Promise<bigint>;
 }
 
 export type BookSnapshot = {
@@ -286,6 +303,12 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
     _conditionId: string,
     _silent?: boolean,
   ): Promise<void> {}
+
+  async wrapUSDC(_amount: bigint): Promise<void> {}
+  async unwrapUSDC(_amount: bigint): Promise<void> {}
+  async getTokenBalance(_token: `0x${string}`): Promise<bigint> {
+    return 0n;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,19 +366,19 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
   }
 
   async init(): Promise<void> {
-    const creds = await new ClobClient(
-      this._host,
-      137,
-      this._signer,
-    ).createOrDeriveApiKey();
-    this.clob = new ClobClient(
-      this._host,
-      137,
-      this._signer,
+    const creds = await new ClobClient({
+      host: this._host,
+      chain: Chain.POLYGON,
+      signer: this._signer,
+    }).createOrDeriveApiKey();
+    this.clob = new ClobClient({
+      host: this._host,
+      chain: Chain.POLYGON,
+      signer: this._signer,
       creds,
-      1, // Magic/Email login
-      this._funder,
-    );
+      signatureType: 1, // Magic/Email login
+      funderAddress: this._funder,
+    });
   }
 
   // Optimized way of posting multiple orders without making many API calls
@@ -371,14 +394,15 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
           price: req.price,
           size: req.shares,
           side: req.action === "buy" ? Side.BUY : Side.SELL,
-          // For maker (GTC, GTD) orders feeRateBps is 0, we still pass it
-          // because the operator (Polymarket) will correct that for ourselves.
-          feeRateBps: req.feeRateBps,
         };
-        return this.clob.orderBuilder.buildOrder(userOrder, {
-          tickSize: req.tickSize as TickSize,
-          negRisk: req.negRisk,
-        });
+        return this.clob.orderBuilder.buildOrder(
+          userOrder,
+          {
+            tickSize: req.tickSize as TickSize,
+            negRisk: req.negRisk,
+          },
+          2,
+        );
       }),
     );
 
@@ -470,26 +494,104 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
     });
   }
 
-  async redeemPositions(conditionId: string, silent = false): Promise<void> {
+  private _buildRelay(): RelayClient {
     const account = privateKeyToAccount(
       this._signer.privateKey as `0x${string}`,
     );
     const walletClient = createWalletClient({
       account,
       chain: polygon,
-      transport: http("https://polygon-bor-rpc.publicnode.com"),
+      transport: http(POLYGON_RPC),
     });
-    const relay = new RelayClient(
+    return new RelayClient(
       RELAYER_URL,
-      137,
+      Chain.POLYGON,
       walletClient,
       this._builderConfig,
       RelayerTxType.PROXY,
     );
+  }
+
+  async getTokenBalance(token: `0x${string}`): Promise<bigint> {
+    const owner = (this._funder ?? this._signer.address) as `0x${string}`;
+    const publicClient = createPublicClient({
+      chain: polygon,
+      transport: http(POLYGON_RPC),
+    });
+    return await publicClient.readContract({
+      address: token,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [owner],
+    });
+  }
+
+  async wrapUSDC(amount: bigint): Promise<void> {
+    const funder = (this._funder ?? this._signer.address) as `0x${string}`;
+    const relay = this._buildRelay();
+    const response = await relay.execute(
+      [
+        {
+          to: USDC_ADDRESS as `0x${string}`,
+          data: encodeFunctionData({
+            abi: ERC20_ABI,
+            functionName: "approve",
+            args: [ONRAMP, amount],
+          }),
+          value: "0",
+        },
+        {
+          to: ONRAMP,
+          data: encodeFunctionData({
+            abi: RAMP_ABI,
+            functionName: "wrap",
+            args: [USDC_ADDRESS as `0x${string}`, funder, amount],
+          }),
+          value: "0",
+        },
+      ],
+      "wrap USDC.e -> pUSD",
+    );
+    const result = await response.wait();
+    if (!result) throw new Error("Wrap relay failed");
+  }
+
+  async unwrapUSDC(amount: bigint): Promise<void> {
+    const funder = (this._funder ?? this._signer.address) as `0x${string}`;
+    const relay = this._buildRelay();
+    const response = await relay.execute(
+      [
+        {
+          to: pUSD_ADDRESS as `0x${string}`,
+          data: encodeFunctionData({
+            abi: ERC20_ABI,
+            functionName: "approve",
+            args: [OFFRAMP, amount],
+          }),
+          value: "0",
+        },
+        {
+          to: OFFRAMP,
+          data: encodeFunctionData({
+            abi: RAMP_ABI,
+            functionName: "unwrap",
+            args: [USDC_ADDRESS as `0x${string}`, funder, amount],
+          }),
+          value: "0",
+        },
+      ],
+      "unwrap pUSD -> USDC.e",
+    );
+    const result = await response.wait();
+    if (!result) throw new Error("Unwrap relay failed");
+  }
+
+  async redeemPositions(conditionId: string, silent = false): Promise<void> {
+    const relay = this._buildRelay();
     const data = encodeFunctionData({
       abi: CTF_REDEEM_ABI,
       functionName: "redeemPositions",
-      args: [USDC_ADDRESS, zeroHash, conditionId as `0x${string}`, [1n, 2n]],
+      args: [pUSD_ADDRESS, zeroHash, conditionId as `0x${string}`, [1n, 2n]],
     });
 
     const origLog = console.log;
@@ -506,6 +608,11 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
       const result = await response.wait();
       if (!result)
         throw new Error(`Redemption relay failed for ${conditionId}`);
+
+      // const usdceBalance = await this.getTokenBalance(
+      //   USDC_ADDRESS as `0x${string}`,
+      // );
+      // if (usdceBalance > 0n) await this.wrapUSDC(usdceBalance);
     } finally {
       if (silent) {
         console.log = origLog;

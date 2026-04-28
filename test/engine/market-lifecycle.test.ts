@@ -498,3 +498,37 @@ describe("Test 9: hold() prevents premature STOPPING", () => {
     TEST_TIMEOUT,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Test 10: strategy cleanup is called when lifecycle transitions to STOPPING
+// ---------------------------------------------------------------------------
+
+describe("Test 10: strategy cleanup is invoked on STOPPING transition", () => {
+  let runner: FixtureRunner;
+  let cleanupCalled = false;
+
+  beforeEach(async () => {
+    runner = new FixtureRunner();
+
+    await runner.setup(async (_ctx) => {
+      return () => {
+        cleanupCalled = true;
+      };
+    });
+  });
+
+  afterEach(() => runner.teardown());
+
+  test(
+    "cleanup fn returned by strategy is called once lifecycle enters STOPPING",
+    async () => {
+      expect(cleanupCalled).toBe(false);
+
+      // Advance past slot end to trigger RUNNING → STOPPING (→ DONE since no orders)
+      await runner.advanceTo(SLOT_END_MS + 500);
+
+      expect(cleanupCalled).toBe(true);
+    },
+    TEST_TIMEOUT,
+  );
+});

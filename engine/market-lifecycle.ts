@@ -192,7 +192,6 @@ export class MarketLifecycle {
     this._marketLogger.destroy();
     this._marketPriceHandle?.cancel();
     if (this._marketOpenTimer) clearTimeout(this._marketOpenTimer);
-    this._strategyCleanup?.();
     this._orderBook.destroy();
     this._log(`[${this.slug}] destroy()`, "dim");
   }
@@ -358,6 +357,8 @@ export class MarketLifecycle {
    * STOPPING: cancel pending buys, drain sells, emergency sell on timeout.
    */
   private async _handleStopping(): Promise<void> {
+    this._strategyCleanup?.();
+
     // Cancel any remaining buys (in case shutdown was called externally)
     await this._cancelPendingBuys();
 

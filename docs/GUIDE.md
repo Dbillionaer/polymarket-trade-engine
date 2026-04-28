@@ -2,6 +2,8 @@
 
 This document is the primary reference for developing strategies on the Polymarket binary prediction market trading engine. It covers the CLI interface, configuration, engine architecture, the strategy API, and best practices.
 
+> **Upgrading from engine which uses clob-client v1?** See the [v2 Migration Guide](MIGRATE_V2.md) for the one-time USDC.e → pUSD wrap step required before running the engine.
+
 ---
 
 ## Table of Contents
