@@ -358,6 +358,7 @@ export class MarketLifecycle {
    */
   private async _handleStopping(): Promise<void> {
     this._strategyCleanup?.();
+    this._strategyCleanup = null;
 
     // Cancel any remaining buys (in case shutdown was called externally)
     await this._cancelPendingBuys();
