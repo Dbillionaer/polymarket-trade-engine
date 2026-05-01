@@ -505,14 +505,37 @@ describe("Test 9: hold() prevents premature STOPPING", () => {
 
 describe("Test 10: strategy cleanup is invoked on STOPPING transition", () => {
   let runner: FixtureRunner;
-  let cleanupCalled = false;
+  let cleanupCallCount = 0;
 
   beforeEach(async () => {
     runner = new FixtureRunner();
+    cleanupCallCount = 0;
 
-    await runner.setup(async (_ctx) => {
+    await runner.setup(async (ctx) => {
+      // Buy fills immediately; sell at 0.99 won't match any bid in the fixture —
+      // keeps the lifecycle in STOPPING across multiple ticks so we can verify
+      // cleanup is only called once despite repeated _handleStopping invocations.
+      ctx.postOrders([
+        {
+          req: { tokenId: DOWN_TOKEN, action: "buy", price: 0.5, shares: 6 },
+          expireAtMs: SLOT_END_MS,
+          onFilled: (shares) => {
+            ctx.postOrders([
+              {
+                req: {
+                  tokenId: DOWN_TOKEN,
+                  action: "sell",
+                  price: 0.99,
+                  shares,
+                },
+                expireAtMs: SLOT_END_MS,
+              },
+            ]);
+          },
+        },
+      ]);
       return () => {
-        cleanupCalled = true;
+        cleanupCallCount++;
       };
     });
   });
@@ -520,15 +543,165 @@ describe("Test 10: strategy cleanup is invoked on STOPPING transition", () => {
   afterEach(() => runner.teardown());
 
   test(
-    "cleanup fn returned by strategy is called once lifecycle enters STOPPING",
+    "cleanup fn is called exactly once across multiple STOPPING ticks",
     async () => {
-      expect(cleanupCalled).toBe(false);
+      // Buy fills; sell at 0.99 is placed but won't match any bid
+      await runner.advanceTo(LOG_START_TS + 2000);
 
-      // Advance past slot end to trigger RUNNING → STOPPING (→ DONE since no orders)
-      await runner.advanceTo(SLOT_END_MS + 500);
-      await runner.waitForState("STOPPING", SLOT_END_MS + 1000);
+      // Force STOPPING while the unfillable sell is still pending
+      runner.lifecycle.shutdown();
+      expect(runner.lifecycle.state).toBe("STOPPING");
 
-      expect(cleanupCalled).toBe(true);
+      // Advance ~500 ms — ~5 ticks fire in STOPPING; cleanup must run only once
+      await runner.advanceTo(LOG_START_TS + 2500);
+      expect(runner.lifecycle.state).toBe("STOPPING");
+      expect(cleanupCallCount).toBe(1);
+
+      // Advance past slot end — sell gets cancelled, lifecycle resolves to DONE
+      await runner.advanceTo(TS_AFTER_SLOT);
+      await runner.waitForState("DONE", TS_AFTER_SLOT + 30_000);
+
+      expect(cleanupCallCount).toBe(1);
+    },
+    TEST_TIMEOUT,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 11: lifecycle-initiated cancel does not fire onFailed
+// ---------------------------------------------------------------------------
+
+describe("Test 11: lifecycle-initiated cancel does not call onFailed", () => {
+  let runner: FixtureRunner;
+  let failedCalled = false;
+
+  beforeEach(async () => {
+    runner = new FixtureRunner();
+    failedCalled = false;
+
+    await runner.setup(async (ctx) => {
+      const expiry = Date.now() + 2000;
+      ctx.postOrders([
+        {
+          req: { tokenId: UP_TOKEN, action: "buy", price: 0.4, shares: 6 },
+          // UP ask is 0.51 — a buy at 0.40 never fills, so expiry triggers cancel
+          expireAtMs: expiry,
+          onFailed: () => {
+            failedCalled = true;
+          },
+        },
+      ]);
+    });
+  });
+
+  afterEach(() => runner.teardown());
+
+  test(
+    "order cancelled via expiry does not trigger onFailed",
+    async () => {
+      // Advance past the 2s expiry. _cancelOrders untracks the order from the
+      // channel before calling the API, so no CANCELLATION callback fires.
+      await runner.advanceTo(LOG_START_TS + 5000);
+
+      expect(failedCalled).toBe(false);
+    },
+    TEST_TIMEOUT,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 12: emergencySells should fill in the 2s per-attempt window even when
+// MINED settlement is delayed by 4s (production-like simulation timing).
+// ---------------------------------------------------------------------------
+//
+describe("Test 12: emergencySells fills despite 4s MINED delay", () => {
+  let runner: FixtureRunner;
+  let emergencyTriggered = false;
+
+  beforeEach(async () => {
+    runner = new FixtureRunner();
+    emergencyTriggered = false;
+
+    await runner.setup(async (ctx) => {
+      const release = ctx.hold();
+
+      ctx.postOrders([
+        {
+          req: { tokenId: DOWN_TOKEN, action: "buy", price: 0.5, shares: 6 },
+          expireAtMs: SLOT_END_MS,
+          onFilled: (boughtShares) => {
+            // Switch to prod-like 4s MINED delay before placing the sell so
+            // the buy itself isn't affected — only the emergency-sell path is.
+            process.env.SIM_BALANCE_DELAY_MS = "4000";
+
+            // Park the sell at 0.99 — far above any DOWN bid in the fixture,
+            // so it sits idle until emergencySells re-prices it at the bid.
+            ctx.postOrders([
+              {
+                req: {
+                  tokenId: DOWN_TOKEN,
+                  action: "sell",
+                  price: 0.99,
+                  shares: boughtShares,
+                },
+                expireAtMs: SLOT_END_MS,
+              },
+            ]);
+
+            // Once the parked sell is registered in pendingOrders, trigger
+            // emergencySells. 500ms is far longer than the 0ms simulateDelay,
+            // so the sell will be visible in pendingOrders.
+            setTimeout(() => {
+              const sellIds = ctx.pendingOrders
+                .filter((o) => o.action === "sell")
+                .map((o) => o.orderId);
+              if (sellIds.length > 0) {
+                emergencyTriggered = true;
+                void ctx.emergencySells(sellIds).finally(() => release());
+              } else {
+                release();
+              }
+            }, 500);
+          },
+        },
+      ]);
+    });
+  });
+
+  afterEach(() => runner.teardown());
+
+  test(
+    "emergency sell fills via MINED before per-attempt expiry cancels it",
+    async () => {
+      // Timeline:
+      //   T+0ms       buy @ 0.50 placed
+      //   T+~100ms    buy MATCHED + MINED (SIM_BALANCE_DELAY_MS=0 at this point)
+      //   T+~100ms    onFilled → SIM_BALANCE_DELAY_MS=4000; parked SELL @ 0.99 placed
+      //   T+600ms     emergencySells triggered → cancels 0.99 sell, places at bid 0.49
+      //   T+~700ms    _check synthesizes MATCHED on the 0.49 sell; MINED scheduled for T+~4700ms
+      //   T+~2700ms   _checkExpiries fires (2s after place)
+      //                 - WITHOUT fix: cancels and untracks; MINED at T+~4700 is dropped
+      //                 - WITH fix:    sees matched state, defers expiry
+      //   T+~4700ms   MINED fires → onFilled → loop exits (only with fix)
+      //
+      // 10s of fake time is enough for the full sequence; without the fix
+      // the order would still be in retry-loop limbo and these asserts fail.
+      await runner.advanceTo(LOG_START_TS + 10_000);
+
+      expect(emergencyTriggered).toBe(true);
+
+      // The emergency sell loop re-priced from 0.99 to the live DOWN bid
+      // (0.49) before filling. Verify via orderHistory — the parked sell at
+      // 0.99 was cancelled by emergencySells and never appears as a fill.
+      const sellHistory = runner.lifecycle.orderHistory.filter(
+        (o) => o.action === "sell",
+      );
+      expect(sellHistory).toHaveLength(1);
+      expect(sellHistory[0]!.price).toBe(0.49);
+      expect(sellHistory[0]!.shares).toBe(6);
+
+      // 6 shares × (0.49 - 0.50) = -$0.06
+      expect(runner.lifecycle.pnl).toBeCloseTo(-0.06, 5);
     },
     TEST_TIMEOUT,
   );

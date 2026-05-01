@@ -151,11 +151,8 @@ INIT --> RUNNING --> STOPPING --> DONE
 
 **RUNNING**
 
-- Every tick (~100ms), processes all pending orders:
-  - Checks if orders have been filled (via the CLOB API).
-  - Checks if orders have expired (based on `expireAtMs`).
-  - Checks if orders have failed.
-  - Fires the appropriate callback (`onFilled`, `onExpired`, `onFailed`).
+- Fills, exchange-initiated cancellations, and other order state changes are pushed in real time over a per-market user-channel WebSocket. `onFilled` and `onFailed` fire as those events arrive — there is no per-tick polling delay before a strategy sees a fill.
+- A periodic engine sweep checks each pending order against its `expireAtMs`. Orders past their deadline are cancelled and `onExpired` fires (or `onFilled` with the partial amount if the order had already matched but not yet fully settled).
 - Transitions to STOPPING when:
   - The slot time ends (`Date.now() >= slotEndMs`), OR
   - No pending orders remain AND no in-flight placements AND no active strategy holds (`ctx.hold()`).

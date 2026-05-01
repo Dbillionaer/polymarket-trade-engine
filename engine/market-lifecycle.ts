@@ -8,11 +8,11 @@ import type {
   StrategyContext,
   OrderRequest,
 } from "./strategy/types.ts";
-import type { CancelOrderResponse, Order } from "../utils/trading.ts";
+import type { CancelOrderResponse } from "../utils/trading.ts";
 import type { WalletTracker } from "./wallet-tracker.ts";
 import type { TickerTracker } from "../tracker/ticker";
 import { slotFromSlug } from "../utils/slot.ts";
-import { Env } from "../utils/config.ts";
+import type { UserChannel } from "./user-channel.ts";
 
 export type LifecycleState = "INIT" | "RUNNING" | "STOPPING" | "DONE";
 
@@ -46,6 +46,7 @@ export type PendingOrderSnapshot = Omit<
 
 type RecoveryOptions = {
   state: "RUNNING" | "STOPPING";
+  conditionId: string;
   clobTokenIds: [string, string];
   pendingOrders: PendingOrder[];
   orderHistory: CompletedOrder[];
@@ -60,6 +61,7 @@ type MarketLifecycleOptions = {
   strategy: Strategy;
   tracker: WalletTracker;
   ticker: TickerTracker;
+  userChannel: UserChannel;
   recovery?: RecoveryOptions;
   alwaysLog?: boolean;
   /** Optional OrderBook override (used in tests to inject SimOrderBook). */
@@ -70,6 +72,7 @@ export class MarketLifecycle {
   private _state: LifecycleState = "INIT";
   private _ticking = false;
   private _orderBook: OrderBook;
+  private _userChannel: UserChannel;
 
   private _clobTokenIds: [string, string] | null = null;
   private _conditionId: string | null = null;
@@ -108,6 +111,7 @@ export class MarketLifecycle {
     this._ticker = opts.ticker;
     this._alwaysLog = opts.alwaysLog ?? false;
     this._orderBook = opts.orderBook ?? new OrderBook();
+    this._userChannel = opts.userChannel;
 
     const recovery = opts.recovery;
     if (recovery) {
@@ -117,6 +121,27 @@ export class MarketLifecycle {
       this._orderHistory = recovery.orderHistory;
       if (recovery.state === "STOPPING") this._buyBlocked = true;
       this._orderBook.subscribe(recovery.clobTokenIds);
+      this._userChannel.subscribe(recovery.conditionId);
+
+      // track pending orders for user channel
+      for (const pending of this._pendingOrders) {
+        const orderId = pending.orderId;
+        this._userChannel.trackOrder(orderId, {
+          req: {
+            tokenId: pending.tokenId,
+            action: pending.action,
+            price: pending.price,
+            shares: pending.shares,
+            orderType: pending.orderType,
+          },
+          expireAtMs: pending.expireAtMs,
+          onFilled: (gross) => {
+            const p = this._pendingOrders.find((o) => o.orderId === orderId);
+            if (!p) return;
+            this._commitFill(p, gross, 0);
+          },
+        });
+      }
     }
   }
 
@@ -128,6 +153,9 @@ export class MarketLifecycle {
   }
   get clobTokenIds(): [string, string] | null {
     return this._clobTokenIds;
+  }
+  get conditionId(): string | null {
+    return this._conditionId;
   }
   get pendingOrders(): PendingOrderSnapshot[] {
     return this._pendingOrders.map(
@@ -193,6 +221,10 @@ export class MarketLifecycle {
     this._marketPriceHandle?.cancel();
     if (this._marketOpenTimer) clearTimeout(this._marketOpenTimer);
     this._orderBook.destroy();
+    for (const pending of this._pendingOrders) {
+      this._userChannel.untrackOrder(pending.orderId);
+    }
+    this._userChannel.destroy();
     this._log(`[${this.slug}] destroy()`, "dim");
   }
 
@@ -229,8 +261,6 @@ export class MarketLifecycle {
     }
   }
 
-  /** Fetch market metadata (conditionId, tokenIds, feeRate). Called by both
-   *  normal init and recovery so both paths have the same market context. */
   async setup(): Promise<void> {
     await this.apiQueue.queueEventDetails(this.slug);
     const event = this.apiQueue.eventDetails.get(this.slug);
@@ -257,6 +287,7 @@ export class MarketLifecycle {
     }, delayMs);
 
     this._orderBook.subscribe(this._clobTokenIds);
+    this._userChannel.subscribe(this._conditionId!);
     this._marketLogger.setSnapshotProvider(() =>
       this._orderBook.getSnapshotData(),
     );
@@ -319,6 +350,7 @@ export class MarketLifecycle {
     };
 
     await this._orderBook.waitForReady();
+    await this._userChannel.waitForReady();
 
     const cleanup = await this._strategy(ctx);
     if (cleanup) this._strategyCleanup = cleanup;
@@ -326,8 +358,9 @@ export class MarketLifecycle {
   }
 
   /**
-   * Generic tick for RUNNING: check every pending order for fill or expiry,
-   * fire callbacks. Transitions to STOPPING when the slot ends or all orders drain.
+   * Generic tick for RUNNING: check pending order expiries and fire callbacks.
+   * Fills arrive asynchronously via the user channel's onFilled callback.
+   * Transitions to STOPPING when the slot ends or all orders drain.
    */
   private async _handleRunning(): Promise<void> {
     if (Date.now() >= this.slotEndMs) {
@@ -339,7 +372,7 @@ export class MarketLifecycle {
       return;
     }
 
-    await this._processPendingOrders();
+    await this._checkExpiries();
 
     // If no pending orders remain, no placements in flight, no strategy holds,
     // and no unfilled positions that a stop-loss may still sell, we're done
@@ -389,8 +422,8 @@ export class MarketLifecycle {
       return;
     }
 
-    // Process sells normally (check fills, expiries)
-    await this._processPendingOrders();
+    // Check expiries for remaining sells
+    await this._checkExpiries();
 
     if (this._pendingOrders.length === 0 && this._inFlight === 0) {
       if (this._hasUnfilledPositions()) {
@@ -405,109 +438,26 @@ export class MarketLifecycle {
   }
 
   /**
-   * Check all pending orders for fill or expiry. Fire callbacks.
-   * Callbacks may enqueue new pending orders, which will be picked up next tick.
+   * Cancel any orders that have passed their expireAtMs.
+   * Fills arrive via user channel callbacks — this only handles expiry.
    */
-  private async _processPendingOrders(): Promise<void> {
-    if (this._pendingOrders.length == 0) return;
-
-    // Snapshot the list — callbacks may mutate _pendingOrders
-    const snapshot = [...this._pendingOrders];
-
-    // Fetch full status for every pending order directly.
-    // This correctly handles immediate fills (order filled before appearing in open
-    // order list) as well as cancelled orders, without relying on getOpenOrderIds.
-    const CLOB_INDEX_GRACE_MS = 5000;
-    const statuses = await Promise.all(
-      snapshot.map((p) => this.client.getOrderById(p.orderId)),
-    );
-    const statusMap = new Map<string, Order | null>(
-      snapshot.map((p, i) => [p.orderId, statuses[i]!]),
-    );
-
-    const commitFill = (pending: PendingOrder, shares: number, fee = 0) => {
-      if (pending.action === "buy") {
-        this._tracker.onBuyFilled(
-          pending.orderId,
-          pending.tokenId,
-          pending.price,
-          shares,
-        );
-      } else {
-        this._tracker.onSellFilled(
-          pending.orderId,
-          pending.tokenId,
-          pending.price,
-          shares,
-        );
-      }
-      this._orderHistory.push({
-        action: pending.action,
-        price: pending.price,
-        shares,
-        fee,
-        tokenId: pending.tokenId,
-      });
-      this._removePendingOrder(pending.orderId);
-      this._marketLogger.log(
-        this._createOrderEntry(pending, "filled", { shares }),
-      );
-      if (pending.onFilled) pending.onFilled(shares);
-    };
-
-    for (const pending of snapshot) {
-      // Skip if already removed by a prior callback in this tick
-      if (!this._pendingOrders.includes(pending)) continue;
-
-      const order = statusMap.get(pending.orderId);
-
-      if (order?.status === "live") {
-        // Still live — only check expiry
-        if (Date.now() >= pending.expireAtMs) {
-          await this._cancelOrders([pending.orderId]);
-          const partialShares = order.actualShares ?? 0;
-          if (partialShares > 0) {
-            // Partial fill — treat matched shares as a fill, ignore unmatched remainder
-            commitFill(pending, partialShares);
-          } else if (pending.onExpired) {
-            this._marketLogger.log(this._createOrderEntry(pending, "expired"));
-            await pending.onExpired();
-          }
-        }
-        continue;
-      }
-
-      // null within grace period — CLOB may not have indexed the order yet
-      // this is only for prod client not simulated client
-      if (!order && Date.now() - pending.placedAtMs <= CLOB_INDEX_GRACE_MS)
-        continue;
-
-      if (!order || order.status === "cancelled") {
-        const reason = order ? "cancelled" : "not found";
-        this._removePendingOrder(pending.orderId);
-        this._trackerUnlock(pending);
-        this._marketLogger.log(
-          this._createOrderEntry(pending, "failed", { reason }),
-        );
-        if (pending.onFailed) await pending.onFailed(reason);
-        continue;
-      }
-
-      if (order.status === "filled") {
-        const grossShares =
-          order.actualShares > 0 ? order.actualShares : order.shares;
-        let fee = 0;
-        if (pending.orderType === "FOK" && this._feeRate > 0) {
-          // Taker fee: fee = C × feeRate × p × (1 - p)
-          fee =
-            grossShares * this._feeRate * pending.price * (1 - pending.price);
-        }
-        // Buy fee is deducted in shares, avoids double-counting since fee we price * grossed shares in pnl
-        const shares =
-          pending.action === "buy" && fee > 0
-            ? grossShares - fee / pending.price
-            : grossShares;
-        commitFill(pending, shares, fee);
+  private async _checkExpiries(): Promise<void> {
+    const now = Date.now();
+    for (const pending of this._pendingOrders) {
+      if (now < pending.expireAtMs) continue;
+      // Defer expiry for orders that have MATCHED but are awaiting MINED.
+      // Cancelling here would race against the in-flight settlement — the
+      // trade would be dropped and onFilled never fires.
+      if (this._userChannel.isMatched(pending.orderId)) continue;
+      // Read partial fill from channel BEFORE cancel (order still tracked here).
+      const partialShares = this._userChannel.getMatchedSoFar(pending.orderId);
+      // _cancelOrders untracks from channel BEFORE the API call (race-safe).
+      await this._cancelOrders([pending.orderId]);
+      if (partialShares > 0) {
+        this._commitFill(pending, partialShares, 0);
+      } else if (pending.onExpired) {
+        this._marketLogger.log(this._createOrderEntry(pending, "expired"));
+        void pending.onExpired();
       }
     }
   }
@@ -520,7 +470,6 @@ export class MarketLifecycle {
    * Fire-and-forget order placement. Returns immediately — do NOT await the
    * result to know if an order was placed. Use `onFilled` to react to a fill
    * and `onExpired` to react to a cancellation or failed placement.
-   *
    * Buys retry up to BUY_MAX_RETRIES times on balance errors; sells retry until slot end.
    */
   private _postOrders(requests: OrderRequest[]): void {
@@ -541,7 +490,16 @@ export class MarketLifecycle {
   private async _cancelOrders(
     orderIds: string[],
   ): Promise<CancelOrderResponse> {
-    const response = await this.client.cancelOrders(orderIds);
+    // Skip orders that have MATCHED but are awaiting MINED — cancelling them
+    // would unlock the wallet here while the pending settlement still fires
+    // onFilled later, double-counting the tracker.
+    const cancellable = orderIds.filter(
+      (id) => !this._userChannel.isMatched(id),
+    );
+    // untrack order to avoid "CANCELLATION" event in processOrderEvent
+    for (const id of cancellable) this._userChannel.untrackOrder(id);
+
+    const response = await this.client.cancelOrders(cancellable);
     for (const id of response.canceled) {
       const pending = this._pendingOrders.find((o) => o.orderId === id);
       if (pending) {
@@ -572,7 +530,6 @@ export class MarketLifecycle {
 
     if (canceledSells.length === 0) return;
 
-    // Re-place each sell as FOK at current best bid, retrying until filled or slot ends
     for (const sell of canceledSells) {
       this._emergencySellLoop(sell);
     }
@@ -637,6 +594,43 @@ export class MarketLifecycle {
   // ---------------------------------------------------------------------------
   // Internal helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Commit a fill: update tracker, record in history, remove from pending, log, fire callback.
+   */
+  private _commitFill(
+    pending: PendingOrder,
+    shares: number,
+    fee: number,
+  ): void {
+    if (pending.action === "buy") {
+      this._tracker.onBuyFilled(
+        pending.orderId,
+        pending.tokenId,
+        pending.price,
+        shares,
+      );
+    } else {
+      this._tracker.onSellFilled(
+        pending.orderId,
+        pending.tokenId,
+        pending.price,
+        shares,
+      );
+    }
+    this._orderHistory.push({
+      action: pending.action,
+      price: pending.price,
+      shares,
+      fee,
+      tokenId: pending.tokenId,
+    });
+    this._removePendingOrder(pending.orderId);
+    this._marketLogger.log(
+      this._createOrderEntry(pending, "filled", { shares }),
+    );
+    if (pending.onFilled) pending.onFilled(shares);
+  }
 
   /**
    * Fire-and-forget: places orders and retries any that fail with a balance
@@ -769,6 +763,43 @@ export class MarketLifecycle {
             onFailed: item.onFailed,
           });
           this._marketLogger.log(this._createOrderEntry(item.req, "placed"));
+
+          // Wrap the OrderRequest with fill accounting and register with the user channel.
+          // The channel calls wrapped.onFilled when the order is fully settled on-chain.
+          const orderId = p.orderId;
+          const wrapped: OrderRequest = {
+            req: item.req,
+            expireAtMs: item.expireAtMs,
+            onFilled: (gross) => {
+              const pending = this._pendingOrders.find(
+                (o) => o.orderId === orderId,
+              );
+              if (!pending) return;
+              let fee = 0;
+              if (pending.orderType === "FOK" && this._feeRate > 0) {
+                fee =
+                  gross * this._feeRate * pending.price * (1 - pending.price);
+              }
+              const net =
+                pending.action === "buy" && fee > 0
+                  ? gross - fee / pending.price
+                  : gross;
+              this._commitFill(pending, net, fee);
+            },
+            onFailed: (reason) => {
+              const pending = this._pendingOrders.find(
+                (o) => o.orderId === orderId,
+              );
+              if (!pending) return;
+              this._removePendingOrder(orderId);
+              this._trackerUnlock(pending);
+              this._marketLogger.log(
+                this._createOrderEntry(pending, "failed", { reason }),
+              );
+              item.onFailed?.(reason);
+            },
+          };
+          this._userChannel.trackOrder(orderId, wrapped);
         }
 
         if (retryNext.length === 0) break;

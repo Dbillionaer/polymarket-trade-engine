@@ -16,6 +16,7 @@ import {
   UP_TOKEN,
   DOWN_TOKEN,
 } from "./mock-api-queue.ts";
+import { SimUserChannel } from "../../../engine/user-channel.ts";
 
 export { UP_TOKEN, DOWN_TOKEN, FIXTURE_SLUG };
 
@@ -58,6 +59,7 @@ export class FixtureRunner {
   readonly apiQueue: MockAPIQueue;
   readonly client: EarlyBirdSimClient;
   readonly tracker: WalletTracker;
+  readonly simUserChannel: SimUserChannel;
   lifecycle!: MarketLifecycle;
 
   private clock!: SinonFakeTimers;
@@ -74,9 +76,7 @@ export class FixtureRunner {
     this.apiQueue = new MockAPIQueue();
     this.tracker = new WalletTracker(walletBalance);
 
-    // Wire SimClient to read book state from simBook via lifecycle.getBookSnapshot.
-    // Forward reference is safe because lifecycle is assigned before any order is placed.
-    this.client = new EarlyBirdSimClient((tokenId) => {
+    const getBook = (tokenId: string) => {
       if (!this.lifecycle) {
         return {
           bestAsk: null,
@@ -93,6 +93,14 @@ export class FixtureRunner {
           bestBidLiquidity: null,
         }
       );
+    };
+
+    // Wire SimClient to read book state from simBook via lifecycle.getBookSnapshot.
+    // Forward reference is safe because lifecycle is assigned before any order is placed.
+    this.client = new EarlyBirdSimClient(getBook);
+    this.simUserChannel = new SimUserChannel({
+      getBook,
+      cancelCallbacks: this.client.cancelCallbacks,
     });
   }
 
@@ -101,8 +109,9 @@ export class FixtureRunner {
    * and tick through INIT → RUNNING.
    */
   async setup(strategy: Strategy): Promise<void> {
-    // Suppress simClient network delay so lifecycle ticks are fast
+    // Suppress delays so lifecycle ticks and fills are fast
     process.env.SIM_DELAY_MS = "0";
+    process.env.SIM_BALANCE_DELAY_MS = "0";
 
     this.clock = sinon.useFakeTimers({
       now: LOG_START_TS,
@@ -127,6 +136,7 @@ export class FixtureRunner {
       tracker: this.tracker,
       ticker: this.simTicker as any,
       orderBook: this.simBook,
+      userChannel: this.simUserChannel,
     });
 
     // Apply the first real snapshot (second line has non-null data at LOG_START_TS + 1001ms)
@@ -192,6 +202,7 @@ export class FixtureRunner {
   /** Restore sinon clock and destroy the lifecycle. */
   teardown(): void {
     delete process.env.SIM_DELAY_MS;
+    delete process.env.SIM_BALANCE_DELAY_MS;
     this.lifecycle?.destroy();
     this.clock?.restore();
   }

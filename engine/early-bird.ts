@@ -2,6 +2,8 @@ import { APIQueue } from "../tracker/api-queue.ts";
 import type { EarlyBirdClient } from "./client.ts";
 import { EarlyBirdSimClient, PolymarketEarlyBirdClient } from "./client.ts";
 import { MarketLifecycle } from "./market-lifecycle.ts";
+import { PolymarketUserChannel, SimUserChannel } from "./user-channel.ts";
+import type { UserChannel } from "./user-channel.ts";
 import { loadState, saveState, type CompletedMarketState } from "./state.ts";
 import { getSlug } from "../utils/slot.ts";
 import { log } from "./log.ts";
@@ -39,6 +41,7 @@ export class EarlyBird {
   private _roundsCreated = 0;
   private _tracker!: WalletTracker;
   private _ticker = new TickerTracker();
+  private _userChannelFactory: (() => UserChannel) | null = null;
 
   constructor(
     strategyName?: string,
@@ -82,6 +85,30 @@ export class EarlyBird {
     log.write(`[startup] ${Env.getAssetConfig().apiSymbol} ticker ready`);
 
     await this._client.init();
+
+    if (this._prod) {
+      const creds = (this._client as PolymarketEarlyBirdClient).getApiCreds();
+      this._userChannelFactory = () =>
+        new PolymarketUserChannel({ creds, client: this._client });
+    } else {
+      const simClient = this._client as EarlyBirdSimClient;
+      this._userChannelFactory = () =>
+        new SimUserChannel({
+          getBook: (tokenId) => {
+            for (const lifecycle of this._lifecycles.values()) {
+              const snap = lifecycle.getBookSnapshot(tokenId);
+              if (snap) return snap;
+            }
+            return {
+              bestAsk: null,
+              bestAskLiquidity: null,
+              bestBid: null,
+              bestBidLiquidity: null,
+            };
+          },
+          cancelCallbacks: simClient.cancelCallbacks,
+        });
+    }
 
     // Seed wallet tracker
     let initialBalance: number;
@@ -142,6 +169,7 @@ export class EarlyBird {
         (msg, color) => log.write(msg, color),
         this._tracker,
         this._ticker,
+        this._userChannelFactory!,
       );
       for (const [slug, lifecycle] of recovered) {
         this._lifecycles.set(slug, lifecycle);
@@ -189,6 +217,7 @@ export class EarlyBird {
             tracker: this._tracker,
             ticker: this._ticker,
             alwaysLog: this._alwaysLog,
+            userChannel: this._userChannelFactory!(),
           }),
         );
         this._roundsCreated++;
@@ -284,6 +313,7 @@ export class EarlyBird {
         slug,
         state: l.state as "RUNNING" | "STOPPING",
         strategyName: l.strategyName,
+        conditionId: l.conditionId!,
         clobTokenIds: l.clobTokenIds!,
         pendingOrders: l.pendingOrders,
         orderHistory: l.orderHistory,

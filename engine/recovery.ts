@@ -8,6 +8,7 @@ import { strategies } from "./strategy/index.ts";
 import type { WalletTracker } from "./wallet-tracker.ts";
 import type { TickerTracker } from "../tracker/ticker";
 import { slotFromSlug } from "../utils/slot.ts";
+import type { UserChannel } from "./user-channel.ts";
 
 type LogFn = (msg: string, color?: LogColor) => void;
 
@@ -29,6 +30,7 @@ export async function recover(
   logFn: LogFn,
   tracker: WalletTracker,
   ticker: TickerTracker,
+  userChannelFactory: () => UserChannel,
 ): Promise<Map<string, MarketLifecycle>> {
   const lifecycles = new Map<string, MarketLifecycle>();
 
@@ -40,6 +42,7 @@ export async function recover(
       logFn,
       tracker,
       ticker,
+      userChannelFactory,
     );
     if (lifecycle) lifecycles.set(market.slug, lifecycle);
   }
@@ -54,6 +57,7 @@ async function recoverMarket(
   logFn: LogFn,
   tracker: WalletTracker,
   ticker: TickerTracker,
+  userChannelFactory: () => UserChannel,
 ): Promise<MarketLifecycle | null> {
   const strategy = strategies[market.strategyName];
   if (!strategy) {
@@ -165,8 +169,10 @@ async function recoverMarket(
     strategy,
     tracker,
     ticker,
+    userChannel: userChannelFactory(),
     recovery: {
       state: "STOPPING",
+      conditionId: market.conditionId,
       clobTokenIds: market.clobTokenIds,
       pendingOrders: pendingSells,
       orderHistory,

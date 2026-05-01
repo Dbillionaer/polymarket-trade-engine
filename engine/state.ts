@@ -6,6 +6,7 @@ export type MarketState = {
   slug: string;
   state: "RUNNING" | "STOPPING";
   strategyName: string;
+  conditionId: string;
   clobTokenIds: [string, string];
   pendingOrders: PendingOrderSnapshot[];
   orderHistory: CompletedOrder[];

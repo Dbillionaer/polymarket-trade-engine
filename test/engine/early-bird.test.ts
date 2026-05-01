@@ -1,4 +1,4 @@
-import { describe, test, expect, afterEach, afterAll } from "bun:test";
+import { describe, test, expect, afterEach, afterAll, beforeAll } from "bun:test";
 import sinon, { type SinonFakeTimers, type SinonStub } from "sinon";
 import { EarlyBird } from "../../engine/early-bird.ts";
 import type { PersistentState } from "../../engine/state.ts";
@@ -7,6 +7,7 @@ import {
   FIXTURE_SLUG,
   UP_TOKEN,
   DOWN_TOKEN,
+  CONDITION_ID,
 } from "./helpers/mock-api-queue.ts";
 import { SimTickerTracker } from "./helpers/sim-ticker.ts";
 import { ModuleMocker } from "../helpers/mock-module.ts";
@@ -42,7 +43,20 @@ await mocker.mock("../../tracker/orderbook.ts", () => ({
   },
 }));
 
-afterAll(() => mocker.clear());
+beforeAll(() => {
+  process.env.SIM_DELAY_MS = "0";
+  process.env.WALLET_BALANCE = "50000";
+  process.env.ORDERBOOK_WS_URL = "ws://127.0.0.1:1";
+  process.env.MARKET_ASSET = "btc";
+});
+
+afterAll(() => {
+  delete process.env.SIM_DELAY_MS;
+  delete process.env.WALLET_BALANCE;
+  delete process.env.ORDERBOOK_WS_URL;
+  delete process.env.MARKET_ASSET;
+  mocker.clear();
+});
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -83,9 +97,6 @@ type HarnessOpts = {
 };
 
 function makeHarness(opts: HarnessOpts = {}): Harness {
-  process.env.SIM_DELAY_MS = "0";
-  process.env.WALLET_BALANCE = "50000";
-  process.env.ORDERBOOK_WS_URL = "ws://127.0.0.1:1";
   if (opts.maxSessionLoss !== undefined) {
     process.env.MAX_SESSION_LOSS = String(opts.maxSessionLoss);
   }
@@ -125,9 +136,6 @@ function makeHarness(opts: HarnessOpts = {}): Harness {
       try {
         exitStub.restore();
       } catch {}
-      delete process.env.SIM_DELAY_MS;
-      delete process.env.WALLET_BALANCE;
-      delete process.env.ORDERBOOK_WS_URL;
       delete process.env.MAX_SESSION_LOSS;
     },
   };
@@ -328,6 +336,7 @@ describe("EarlyBird — recovery", () => {
             slug: FUTURE_SLOT_SLUG,
             state: "STOPPING",
             strategyName: "test-strategy",
+            conditionId: CONDITION_ID,
             clobTokenIds: [UP_TOKEN, DOWN_TOKEN],
             pendingOrders: [
               {
@@ -346,10 +355,6 @@ describe("EarlyBird — recovery", () => {
         completedMarkets: [],
       };
 
-      process.env.SIM_DELAY_MS = "0";
-      process.env.WALLET_BALANCE = "50000";
-      process.env.ORDERBOOK_WS_URL = "ws://127.0.0.1:1";
-
       const eb = new EarlyBird("test-strategy", 1, false, null);
       (eb as any)._ticker = new SimTickerTracker();
       (eb as any)._apiQueue = new MockAPIQueue();
@@ -364,9 +369,6 @@ describe("EarlyBird — recovery", () => {
         );
       } finally {
         exitStub.restore();
-        delete process.env.SIM_DELAY_MS;
-        delete process.env.WALLET_BALANCE;
-        delete process.env.ORDERBOOK_WS_URL;
       }
     },
     TEST_TIMEOUT,
@@ -384,6 +386,7 @@ describe("EarlyBird — recovery", () => {
             slug: "btc-updown-5m-100",
             state: "STOPPING",
             strategyName: "test-strategy",
+            conditionId: CONDITION_ID,
             clobTokenIds: [UP_TOKEN, DOWN_TOKEN],
             pendingOrders: [
               {
@@ -402,10 +405,6 @@ describe("EarlyBird — recovery", () => {
         completedMarkets: [],
       };
 
-      process.env.SIM_DELAY_MS = "0";
-      process.env.WALLET_BALANCE = "50000";
-      process.env.ORDERBOOK_WS_URL = "ws://127.0.0.1:1";
-
       const eb = new EarlyBird("test-strategy", 1, false, null);
       (eb as any)._ticker = new SimTickerTracker();
       (eb as any)._apiQueue = new MockAPIQueue();
@@ -417,9 +416,6 @@ describe("EarlyBird — recovery", () => {
         expect((eb as any)._lifecycles.has("btc-updown-5m-100")).toBe(false);
       } finally {
         exitStub.restore();
-        delete process.env.SIM_DELAY_MS;
-        delete process.env.WALLET_BALANCE;
-        delete process.env.ORDERBOOK_WS_URL;
       }
     },
     TEST_TIMEOUT,

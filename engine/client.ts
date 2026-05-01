@@ -107,7 +107,7 @@ export type BookSnapshot = {
  * price must exceed `shares * price * 2` (a 2× cost buffer to avoid fills on
  * thin, illiquid ticks).
  */
-function isSimFilled(
+export function isSimFilled(
   order: { action: "buy" | "sell"; price: number; shares: number },
   book: BookSnapshot,
 ): boolean {
@@ -137,6 +137,9 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
   private _orders = new Map<string, Order>();
   /** tokenId → earliest ms at which sells can be placed (simulates on-chain balance delay). */
   private _balanceReadyAt = new Map<string, number>();
+  /** orderId → callback invoked when the sim client cancels that order. Used by SimUserChannel
+   *  to synthesize CANCELLATION events, letting tests verify untrackOrder suppresses onFailed. */
+  readonly cancelCallbacks = new Map<string, () => void>();
 
   constructor(private getBook: (tokenId: string) => BookSnapshot) {}
 
@@ -279,6 +282,13 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
         not_canceled[id] = "NOT_FOUND";
       }
     }
+    for (const id of canceled) {
+      const cb = this.cancelCallbacks.get(id);
+      if (cb) {
+        this.cancelCallbacks.delete(id);
+        cb();
+      }
+    }
     return { canceled, not_canceled };
   }
 
@@ -335,6 +345,8 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
   private readonly _signer: Wallet;
   private readonly _funder: string | undefined;
   private readonly _builderConfig: BuilderConfig;
+  private _creds: { key: string; secret: string; passphrase: string } | null =
+    null;
 
   constructor() {
     const privateKey = Env.get("PRIVATE_KEY");
@@ -371,6 +383,7 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
       chain: Chain.POLYGON,
       signer: this._signer,
     }).createOrDeriveApiKey();
+    this._creds = creds;
     this.clob = new ClobClient({
       host: this._host,
       chain: Chain.POLYGON,
@@ -379,6 +392,12 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
       signatureType: 1, // Magic/Email login
       funderAddress: this._funder,
     });
+  }
+
+  getApiCreds(): { key: string; secret: string; passphrase: string } {
+    if (!this._creds)
+      throw new Error("init() must be called before getApiCreds()");
+    return this._creds;
   }
 
   // Optimized way of posting multiple orders without making many API calls

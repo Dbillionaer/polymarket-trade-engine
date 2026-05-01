@@ -12,7 +12,7 @@ export type BookDepth = {
 
 // Pad first, then colorize — ANSI codes must not affect padding width
 function _fmtP(v?: number): string {
-  return (v !== undefined ? v.toFixed(2) : "").padStart(P);
+  return (v !== undefined ? v.toString() : "").padStart(P);
 }
 
 function _fmtS(v?: number): string {
@@ -33,8 +33,10 @@ export function renderOrderBookTable(
   fees?: { upFee?: number; downFee?: number },
 ): string[] {
   const colW = P + S + P + S;
-  const upLabel = fees?.upFee != null ? `── UP (fee: ${fees.upFee}bps)` : "── UP";
-  const downLabel = fees?.downFee != null ? `── DOWN (fee: ${fees.downFee}bps)` : "── DOWN";
+  const upLabel =
+    fees?.upFee != null ? `── UP (fee: ${fees.upFee}bps)` : "── UP";
+  const downLabel =
+    fees?.downFee != null ? `── DOWN (fee: ${fees.downFee}bps)` : "── DOWN";
   const header = `${upLabel.padEnd(colW)}${GAP}${downLabel.padEnd(colW)}`;
   const colHdr =
     `${GREEN}${"BID".padStart(P)}${"SIZE".padStart(S)}${RESET}` +

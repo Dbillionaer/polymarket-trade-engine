@@ -69,6 +69,7 @@ describe("loadState", () => {
           slug: "btc-updown-5m-1234",
           state: "RUNNING",
           strategyName: "test",
+          conditionId: "0xtest",
           clobTokenIds: ["UP", "DOWN"],
           pendingOrders: [],
           orderHistory: [],
