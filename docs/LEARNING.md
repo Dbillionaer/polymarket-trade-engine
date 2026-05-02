@@ -77,9 +77,9 @@ If instead you place a buy limit order at $0.52 -- below the best ask -- your or
 
 Every trade on Polymarket has two sides: a maker and a taker. Understanding which role you play determines whether you pay fees.
 
-A **maker** is someone whose order rests on the book and adds liquidity. When you place a limit order below the best ask (for buys) or above the best bid (for sells), your order sits on the book waiting to be matched. You are providing liquidity to the market. GTC (Good-Till-Cancelled) orders that rest on the book are maker orders. Makers are never charged fees on Polymarket.
+A **maker** is someone whose order rests on the book and adds liquidity. When you place a limit order below the best ask (for buys) or above the best bid (for sells), your order sits on the book waiting to be matched. You are providing liquidity to the market. Maker orders (GTC and GTD, described below) are never charged fees on Polymarket.
 
-A **taker** is someone whose order matches immediately against resting orders and removes liquidity. When you place an order that crosses the spread -- a buy at or above the best ask, or a sell at or below the best bid -- you are taking liquidity from the book. FOK (Fill-or-Kill) orders are always taker orders because they demand immediate execution. Takers pay fees.
+A **taker** is someone whose order matches immediately against resting orders and removes liquidity. When you place an order that crosses the spread -- a buy at or above the best ask, or a sell at or below the best bid -- you are taking liquidity from the book. Taker orders (FOK and FAK) demand immediate execution and pay fees.
 
 The taker fee is calculated using the formula:
 
@@ -116,6 +116,29 @@ How fees are collected depends on the order side. On buy orders, the fee is dedu
 This distinction matters for automated trading. If you buy 6 shares with a FOK order and immediately try to sell 6 shares, the sell will fail because you only hold 5.8445 shares after fees.
 
 For the full fee schedule and current rates, see the [Polymarket fee documentation](https://docs.polymarket.com/trading/fees#fee-structure).
+
+### Order Types
+
+Polymarket supports four order types:
+
+| Type | Behavior | Rests on book | Role | Minimum size |
+|------|----------|---------------|------|--------------|
+| GTC | Limit order; sits until filled or cancelled | Yes | Maker | 5 shares |
+| GTD | GTC with an auto-cancel deadline | Yes | Maker | 5 shares |
+| FOK | Fill entirely and immediately, or kill | No | Taker | $1 notional |
+| FAK | Fill what's available immediately, kill the rest | No | Taker | $1 notional |
+
+GTC/GTD rest on the public book, so Polymarket enforces a **5-share minimum** to keep the book free of dust. FOK and FAK never rest, so that minimum doesn't apply -- only the much smaller per-market `min_order_size`.
+
+This matters when a partial fill leaves you holding a position smaller than 5 shares:
+
+```
+  GTC buy 6 @ $0.59  --> only 1.5 shares fill before the ask moves
+  GTC sell 1.5      --> REJECTED: Size (1.5) lower than the minimum: 5
+  FAK sell 1.5      --> fills against the bid, exits the residual
+```
+
+FAK is the safer default for residual cleanup -- FOK rejects the whole order over a microscopic liquidity gap. Both are takers, so the `C × feeRate × p × (1 - p)` fee still applies.
 
 ### Partial Fills and On-Chain Arithmetic
 

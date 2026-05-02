@@ -281,6 +281,16 @@ const html = `<!DOCTYPE html>
       min-height: 100vh;
     }
     .topbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+    .zoom-group { display: flex; gap: 4px; margin-left: 4px; }
+    .zoom-btn {
+      font-family: ui-monospace, monospace; font-size: 0.8rem; font-weight: 600;
+      width: 28px; height: 24px; border-radius: 6px; border: 1px solid #334155;
+      background: #1e293b; color: #94a3b8; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .zoom-btn:hover { background: #334155; color: #e2e8f0; border-color: #475569; }
+    .zoom-btn.reset { width: auto; padding: 0 8px; font-size: 0.65rem; letter-spacing: 0.04em; }
     .infobar {
       display: flex; align-items: center; gap: 16px; flex-shrink: 0; flex-wrap: wrap;
       font-size: 0.7rem; color: #94a3b8; background: #1e293b;
@@ -312,7 +322,19 @@ const html = `<!DOCTYPE html>
       padding: clamp(12px, 2vw, 20px);
       position: relative; min-height: 0;
     }
-    .pane canvas { position: absolute; inset: clamp(12px, 2vw, 20px); }
+    .pane canvas { position: absolute; inset: clamp(12px, 2vw, 20px); cursor: grab; }
+    .pane canvas.panning { cursor: grabbing; }
+    .scrollbar {
+      flex-shrink: 0; height: 14px; background: #1e293b; border-radius: 7px;
+      position: relative; cursor: pointer; user-select: none;
+    }
+    .scrollbar-thumb {
+      position: absolute; top: 2px; bottom: 2px;
+      background: #475569; border-radius: 5px; cursor: grab;
+      transition: background 0.12s;
+    }
+    .scrollbar-thumb:hover { background: #64748b; }
+    .scrollbar-thumb.dragging { background: #94a3b8; cursor: grabbing; }
     .pane-main { flex: 1 0 0; min-height: 420px; }
     .pane-btc  { flex: 0 0 220px; }
     #tooltip {
@@ -332,6 +354,11 @@ const html = `<!DOCTYPE html>
     <button class="st-toggle active" data-status="canceled">Cancelled</button>
     <button class="st-toggle active" data-status="expired">Expired</button>
     <button class="st-toggle active" data-status="failed">Failed</button>
+    <div class="zoom-group">
+      <button class="zoom-btn" id="zoom-out" title="Zoom out (or scroll down)">−</button>
+      <button class="zoom-btn" id="zoom-in" title="Zoom in (or scroll up)">+</button>
+      <button class="zoom-btn reset" id="zoom-reset" title="Reset zoom">RESET</button>
+    </div>
   </div>
   <div class="infobar">
     <div class="stat">
@@ -361,6 +388,7 @@ const html = `<!DOCTYPE html>
   <div class="panes">
     <div class="pane pane-main"><canvas id="chart-main"></canvas></div>
     <div class="pane pane-btc"><canvas id="chart-btc"></canvas></div>
+    <div class="scrollbar" id="scrollbar"><div class="scrollbar-thumb" id="scrollbar-thumb"></div></div>
   </div>
   <div id="tooltip"></div>
 
@@ -375,6 +403,7 @@ const html = `<!DOCTYPE html>
     const btcLineData      = ${JSON.stringify(btcLineData)};
     const ptbLineData      = ${JSON.stringify(ptbLineData)};
     const priceToBeat      = ${JSON.stringify(priceToBeat)};
+    const ptbStartRemaining = ${JSON.stringify(firstPtbPoint?.remaining ?? null)};
     const coinbaseLineData = ${JSON.stringify(coinbaseLineData)};
     const binanceLineData  = ${JSON.stringify(binanceLineData)};
 
@@ -634,10 +663,34 @@ const html = `<!DOCTYPE html>
       return best;
     }
 
+    function hasInteractiveElementAt(chart, e) {
+      if (!chart) return false;
+      const hits = chart.getElementsAtEventForMode(e, "point", { intersect: true }, false);
+      if (hits.length) return true;
+      // Also check proximity to the asset-price line so cursor flips to pointer
+      // even though those points have pointRadius 0.
+      const rect = chart.canvas.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      for (const ds of chart.data.datasets) {
+        if (ds.type !== "line" || !ds.data?.length) continue;
+        for (const pt of ds.data) {
+          if (pt?.x == null || pt?.y == null) continue;
+          const dx = chart.scales.x.getPixelForValue(pt.x) - px;
+          const dy = chart.scales.y.getPixelForValue(pt.y) - py;
+          if (dx * dx + dy * dy < 64) return true; // within 8px
+        }
+      }
+      return false;
+    }
+
     document.querySelectorAll(".pane canvas").forEach((canvas) => {
       canvas.addEventListener("mousemove", (e) => {
         const c = Chart.getChart(canvas);
         if (!c?.scales?.x) return;
+        if (!canvas.classList.contains("panning")) {
+          canvas.style.cursor = hasInteractiveElementAt(c, e) ? "default" : "grab";
+        }
         const xVal = c.scales.x.getValueForPixel(e.clientX - canvas.getBoundingClientRect().left);
         allCharts.forEach((ch) => {
           if (!ch) return;
@@ -664,6 +717,171 @@ const html = `<!DOCTYPE html>
         tooltip.style.display = "none";
       });
     });
+
+    // ── zoom controls ────────────────────────────────────────────────────────
+    const X_BOUNDS = { min: ${xMin}, max: ${xMax} };
+    const MIN_RANGE = 2;
+    const X_REVERSED = true;
+
+    const scrollbar      = document.getElementById("scrollbar");
+    const scrollbarThumb = document.getElementById("scrollbar-thumb");
+
+    function currentXRange() {
+      const ch = allCharts[0];
+      if (!ch?.scales?.x) return { min: X_BOUNDS.min, max: X_BOUNDS.max };
+      return { min: ch.scales.x.min ?? X_BOUNDS.min, max: ch.scales.x.max ?? X_BOUNDS.max };
+    }
+
+    function syncScrollbar() {
+      const total = X_BOUNDS.max - X_BOUNDS.min;
+      if (total <= 0) return;
+      const { min, max } = currentXRange();
+      const trackW = scrollbar.clientWidth;
+      // x axis is reversed: high "remaining" appears on the LEFT. Scrollbar visualizes timeline,
+      // so left edge of scrollbar should map to X_BOUNDS.max (slot start), right edge to X_BOUNDS.min.
+      const leftFrac  = X_REVERSED ? (X_BOUNDS.max - max) / total : (min - X_BOUNDS.min) / total;
+      const widthFrac = (max - min) / total;
+      scrollbarThumb.style.left  = (leftFrac  * trackW) + "px";
+      scrollbarThumb.style.width = Math.max(20, widthFrac * trackW) + "px";
+    }
+
+    function refreshPtbLine(newMin, newMax) {
+      if (priceToBeat == null || ptbStartRemaining == null) return;
+      const ptbDs = btcChart?.data?.datasets?.find((d) => d.label === "Price to Beat");
+      if (!ptbDs) return;
+      // PTB existed from ptbStartRemaining (high remaining) down to X_BOUNDS.min (low remaining).
+      const lo = Math.max(newMin, X_BOUNDS.min);
+      const hi = Math.min(newMax, ptbStartRemaining);
+      ptbDs.data = hi > lo ? [{ x: hi, y: priceToBeat }, { x: lo, y: priceToBeat }] : [];
+    }
+
+    function setXRange(newMin, newMax) {
+      if (newMin < X_BOUNDS.min) { newMax += X_BOUNDS.min - newMin; newMin = X_BOUNDS.min; }
+      if (newMax > X_BOUNDS.max) { newMin -= newMax - X_BOUNDS.max; newMax = X_BOUNDS.max; }
+      refreshPtbLine(newMin, newMax);
+      allCharts.forEach((ch) => {
+        if (!ch?.scales?.x) return;
+        ch.scales.x.options.min = newMin;
+        ch.scales.x.options.max = newMax;
+        ch.update("none");
+      });
+      syncScrollbar();
+    }
+
+    function applyZoom(factor, focusX) {
+      const { min: curMin, max: curMax } = currentXRange();
+      const center = focusX ?? (curMin + curMax) / 2;
+      const range = (curMax - curMin) * factor;
+      if (range < MIN_RANGE) return;
+      if (range > X_BOUNDS.max - X_BOUNDS.min) {
+        setXRange(X_BOUNDS.min, X_BOUNDS.max);
+        return;
+      }
+      const ratio = (center - curMin) / (curMax - curMin);
+      setXRange(center - range * ratio, center + range * (1 - ratio));
+    }
+
+    function resetZoom() {
+      setXRange(X_BOUNDS.min, X_BOUNDS.max);
+    }
+
+    document.getElementById("zoom-in").addEventListener("click", () => applyZoom(0.6));
+    document.getElementById("zoom-out").addEventListener("click", () => applyZoom(1 / 0.6));
+    document.getElementById("zoom-reset").addEventListener("click", resetZoom);
+
+    function applyPan(deltaXPixels, sourceCanvas) {
+      const c = Chart.getChart(sourceCanvas);
+      if (!c?.scales?.x) return;
+      const xs = c.scales.x;
+      const { min: curMin, max: curMax } = currentXRange();
+      const pxPerUnit = (xs.right - xs.left) / (curMax - curMin);
+      const sign = xs.options.reverse ? 1 : -1;
+      const dx = (sign * deltaXPixels) / pxPerUnit;
+      setXRange(curMin + dx, curMax + dx);
+    }
+
+    document.querySelectorAll(".pane canvas").forEach((canvas) => {
+      canvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const c = Chart.getChart(canvas);
+        if (!c?.scales?.x) return;
+        if (e.shiftKey) {
+          applyPan(e.deltaY + e.deltaX, canvas);
+        } else {
+          const xVal = c.scales.x.getValueForPixel(e.clientX - canvas.getBoundingClientRect().left);
+          applyZoom(e.deltaY < 0 ? 0.85 : 1 / 0.85, xVal);
+        }
+      }, { passive: false });
+
+      let panLastX = null;
+      canvas.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        panLastX = e.clientX;
+        canvas.classList.add("panning");
+        canvas.style.cursor = "grabbing";
+        e.preventDefault();
+      });
+      window.addEventListener("mousemove", (e) => {
+        if (panLastX == null) return;
+        const dx = e.clientX - panLastX;
+        panLastX = e.clientX;
+        applyPan(dx, canvas);
+      });
+      window.addEventListener("mouseup", () => {
+        if (panLastX == null) return;
+        panLastX = null;
+        canvas.classList.remove("panning");
+        canvas.style.cursor = "grab";
+      });
+    });
+
+    // ── scrollbar interaction ────────────────────────────────────────────────
+    function scrollbarPosToRange(thumbLeftPx) {
+      const total = X_BOUNDS.max - X_BOUNDS.min;
+      const trackW = scrollbar.clientWidth;
+      const thumbW = scrollbarThumb.offsetWidth;
+      const maxLeft = Math.max(0, trackW - thumbW);
+      const clamped = Math.max(0, Math.min(maxLeft, thumbLeftPx));
+      const leftFrac = maxLeft > 0 ? clamped / trackW : 0;
+      const widthFrac = thumbW / trackW;
+      let newMin, newMax;
+      if (X_REVERSED) {
+        newMax = X_BOUNDS.max - leftFrac * total;
+        newMin = newMax - widthFrac * total;
+      } else {
+        newMin = X_BOUNDS.min + leftFrac * total;
+        newMax = newMin + widthFrac * total;
+      }
+      setXRange(newMin, newMax);
+    }
+
+    let sbDragOffset = null;
+    scrollbarThumb.addEventListener("mousedown", (e) => {
+      sbDragOffset = e.clientX - scrollbarThumb.getBoundingClientRect().left;
+      scrollbarThumb.classList.add("dragging");
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (sbDragOffset == null) return;
+      const trackLeft = scrollbar.getBoundingClientRect().left;
+      scrollbarPosToRange(e.clientX - trackLeft - sbDragOffset);
+    });
+    window.addEventListener("mouseup", () => {
+      if (sbDragOffset == null) return;
+      sbDragOffset = null;
+      scrollbarThumb.classList.remove("dragging");
+    });
+
+    scrollbar.addEventListener("mousedown", (e) => {
+      if (e.target === scrollbarThumb) return;
+      const trackLeft = scrollbar.getBoundingClientRect().left;
+      const thumbW = scrollbarThumb.offsetWidth;
+      scrollbarPosToRange(e.clientX - trackLeft - thumbW / 2);
+    });
+
+    window.addEventListener("resize", syncScrollbar);
+    requestAnimationFrame(syncScrollbar);
   </script>
 </body>
 </html>`;
