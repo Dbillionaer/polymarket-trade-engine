@@ -553,6 +553,21 @@ ctx.postOrders([{
 ### Resilience
 
 - **Design for restarts.** Callbacks are not persisted. If the engine crashes and recovers, pre-crash orders will be tracked but their callbacks will not fire. Avoid designs where the only exit path is a callback chain.
+- **Guard callbacks after cleanup — this is your responsibility.** The engine calls the strategy's cleanup function when the lifecycle transitions to STOPPING, but a pending order may still receive `onFilled` seconds later (Polymarket's MATCHED event is instant, but the MINED settlement is asynchronous). It is the strategy author's job to track a `destroyed` flag and check it inside every callback that could chain into new orders. If the flag is set, bail out immediately.
+
+  ```ts
+  export const myStrategy: Strategy = async (ctx) => {
+    const state = { destroyed: false };
+    // ... place orders ...
+    return () => { state.destroyed = true; /* clear timers */ };
+  };
+
+  // Inside onFilled, onExpired, onFailed, and any chained helpers:
+  onFilled(filledShares) {
+    if (state.destroyed) return;   // lifecycle already wound down
+    // ... safe to chain further orders ...
+  }
+  ```
 - **Respect the session loss limit.** The engine will auto-shut down when cumulative PnL drops below `-MAX_SESSION_LOSS`. Set this value appropriately for your risk tolerance.
 - **Reset session state before starting a new session.** The engine loads `sessionPnL` and `sessionLoss` from the previous state snapshot on startup. If the prior session ended with losses, the engine may immediately trigger the `MAX_SESSION_LOSS` shutdown before placing a single order. Open `state/early-bird.json` (simulation) or `state/early-bird-prod.json` (production) and set both fields to `0` before each new session.
 
